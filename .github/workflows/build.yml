@@ -121,6 +121,22 @@ jobs:
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja ${{ inputs.targets }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Why sccache refuses a compile (quick check only; one compile with debug logging)
+        if: ${{ inputs.targets != '' }}
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath
+          $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
+          Set-Content C:\env.cmd "@echo off`r`ncall `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 >nul`r`ncd /d $dir"
+          $cmds = cmd /c "C:\env.cmd && ninja -t commands ${{ inputs.targets }}"
+          $line = ($cmds | Select-String -Pattern "^sccache" | Select-Object -Skip 1 -First 1).Line
+          # drop the object file first so the compile really runs, then run it with the debug log on
+          $obj = [regex]::Match($line, '/Fo(\S+)').Groups[1].Value
+          if ($obj) { Remove-Item (Join-Path $dir $obj) -ErrorAction SilentlyContinue }
+          Set-Content C:\one.cmd "@echo off`r`ncall C:\env.cmd`r`nset SCCACHE_DIR=C:\sccache-cache`r`nset SCCACHE_LOG=debug`r`nset SCCACHE_ERROR_LOG=C:\sccache-debug.log`r`nsccache --stop-server >nul 2>&1`r`n$line`r`nsccache --show-stats`r`nsccache --stop-server"
+          cmd /c C:\one.cmd 2>&1 | Select-Object -Last 40
+          if (Test-Path C:\sccache-debug.log) { Get-Content C:\sccache-debug.log | Select-String -Pattern "multiple|cannot|Cannot|non-cach|input|Raw" | Select-Object -First 30 | ForEach-Object { "SCCACHE DEBUG: " + $_.Line.Substring(0, [Math]::Min(1500, $_.Line.Length)) } } else { "no sccache debug log" }
+
       - name: Compiler cache statistics
         if: always()
         shell: pwsh
