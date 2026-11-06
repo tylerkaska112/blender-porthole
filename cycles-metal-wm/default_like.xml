@@ -1,0 +1,15 @@
+<cycles>
+  <background>
+    <background name="bg" color="0.05 0.05 0.05" strength="1.0" />
+    <connect from="bg background" to="output surface" />
+  </background>
+  <integrator use_adaptive_sampling="true" adaptive_threshold="0.01" adaptive_min_samples="0" />
+  <shader name="cube"><principled_bsdf name="p" base_color="0.8 0.8 0.8" roughness="0.5" metallic="0.0" /><connect from="p bsdf" to="output surface" /></shader>
+  <shader name="floor"><diffuse_bsdf name="d" color="0.5 0.5 0.55" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="lamp"><emission name="e" color="1 1 1" strength="1" /><connect from="e emission" to="output surface" /></shader>
+  <transform translate="0 0 8" rotate="180 0 1 0"><camera type="perspective" fov="0.8" /></transform>
+  <state shader="floor"><mesh P="-6 -1 -6  6 -1 -6  6 -1 6  -6 -1 6" nverts="4" verts="0 1 2 3" /></state>
+  <state shader="cube"><mesh P="-1 -1 -1  1 -1 -1  1 -1 1  -1 -1 1  -1 1 -1  1 1 -1  1 1 1  -1 1 1"
+      nverts="4 4 4 4 4 4" verts="0 1 2 3  4 7 6 5  0 4 5 1  1 5 6 2  2 6 7 3  3 7 4 0" /></state>
+  <transform translate="3 4 3"><state shader="lamp"><light light_type="point" strength="900 900 900" size="0.1" /></state></transform>
+</cycles>
