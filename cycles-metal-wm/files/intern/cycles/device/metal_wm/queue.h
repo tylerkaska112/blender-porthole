@@ -7,6 +7,8 @@
 
 #ifdef WITH_METAL
 
+#  include <vector>
+
 #  include "device/kernel.h"
 #  include "device/memory.h"
 #  include "device/queue.h"
@@ -56,6 +58,15 @@ class MetalDeviceQueue : public DeviceQueue {
   obj_handle_t mtlComputeEncoder_ = 0;
   obj_handle_t mtlBlitEncoder_ = 0;
   bool compute_encoder_concurrent_ = false;
+
+  /* Diagnostics on stderr (Porthole logs it): what the queue is doing, and a summary of the pixels that come back. */
+  void report_activity(const char *kernel_name);
+  void log_readback(device_memory &mem);
+  std::vector<device_memory *> pending_readbacks_;
+  uint64_t n_enqueue_ = 0;
+  uint64_t n_sync_ = 0;
+  double last_report_ = 0.0;
+  int n_readbacks_logged_ = 0;
 };
 
 CCL_NAMESPACE_END

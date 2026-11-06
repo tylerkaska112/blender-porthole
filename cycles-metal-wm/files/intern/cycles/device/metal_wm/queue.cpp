@@ -7,6 +7,11 @@
 
 #  include "device/metal_wm/queue.h"
 
+#  include <cmath>
+
+#  include "util/half.h"
+#  include "util/time.h"
+
 #  include "util/debug.h"
 #  include "util/log.h"
 #  include "util/time.h"
@@ -183,6 +188,67 @@ void MetalDeviceQueue::close_blit_encoder()
   }
 }
 
+void MetalDeviceQueue::report_activity(const char *kernel_name)
+{
+  /* Once every 3 seconds at most: how many kernels went to the GPU and how often the queue waited for it. */
+  const double now = time_dt();
+  if (now - last_report_ >= 3.0) {
+    last_report_ = now;
+    fprintf(stderr,
+            "[cycles-wm] queue: %llu kernel dispatches, %llu synchronizations so far, last kernel %s\n",
+            (unsigned long long)n_enqueue_,
+            (unsigned long long)n_sync_,
+            kernel_name);
+  }
+}
+
+void MetalDeviceQueue::log_readback(device_memory &mem)
+{
+  /* Summary of what the GPU wrote: all zeros would mean the kernels ran but produced nothing. */
+  if (n_readbacks_logged_ >= 40 || !mem.host_pointer || mem.memory_size() == 0) {
+    return;
+  }
+  size_t count = 0;
+  const bool is_float = (mem.data_type == TYPE_FLOAT);
+  const bool is_half = (mem.data_type == TYPE_HALF);
+  if (is_float) {
+    count = mem.memory_size() / sizeof(float);
+  }
+  else if (is_half) {
+    count = mem.memory_size() / sizeof(half);
+  }
+  else {
+    return;
+  }
+  const size_t limit = std::min<size_t>(count, 8u << 20);
+  size_t nonzero = 0, nans = 0;
+  double sum = 0.0, vmin = 1e30, vmax = -1e30;
+  for (size_t i = 0; i < limit; i++) {
+    const float v = is_float ? ((const float *)mem.host_pointer)[i] :
+                               half_to_float(((const half *)mem.host_pointer)[i]);
+    if (v != v) {
+      nans++;
+      continue;
+    }
+    if (v != 0.0f) {
+      nonzero++;
+    }
+    sum += v;
+    vmin = std::min<double>(vmin, v);
+    vmax = std::max<double>(vmax, v);
+  }
+  n_readbacks_logged_++;
+  fprintf(stderr,
+          "[cycles-wm] readback \"%s\": %zu values checked, %zu non-zero, %zu NaN, min %g, max %g, mean %g\n",
+          mem.log_name().c_str(),
+          limit,
+          nonzero,
+          nans,
+          limit ? vmin : 0.0,
+          limit ? vmax : 0.0,
+          limit ? sum / double(limit) : 0.0);
+}
+
 bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
                                const int work_size,
                                const DeviceKernelArguments &args)
@@ -192,6 +258,8 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
   }
 
   debug_enqueue_begin(kernel, work_size);
+  n_enqueue_++;
+  report_activity(device_kernel_as_string(kernel));
 
   const MetalPipeline *pipeline = metal_device_->get_pipeline(kernel);
   if (!pipeline) {
@@ -360,6 +428,7 @@ bool MetalDeviceQueue::synchronize()
     const WMTCommandBufferStatus status = MTLCommandBuffer_status(mtlCommandBuffer_);
     mtlCommandBuffer_ = 0;
     if (status != WMTCommandBufferStatusCompleted) {
+      fprintf(stderr, "[cycles-wm] command buffer finished with status %d\n", int(status));
       metal_device_->set_error(
           string_printf("Command buffer not completed. status = %d.", int(status)));
     }
@@ -367,6 +436,12 @@ bool MetalDeviceQueue::synchronize()
     /* The GPU is done: what was freed since the last synchronize can go. */
     metal_device_->flush_delayed_free_list();
   }
+
+  n_sync_++;
+  for (device_memory *mem : pending_readbacks_) {
+    log_readback(*mem);
+  }
+  pending_readbacks_.clear();
 
   debug_synchronize();
 
@@ -428,9 +503,12 @@ void MetalDeviceQueue::copy_to_device(device_memory &mem)
   }
 }
 
-void MetalDeviceQueue::copy_from_device(device_memory & /*mem*/)
+void MetalDeviceQueue::copy_from_device(device_memory &mem)
 {
   /* Unified memory: the host reads the buffer in place after the queue was synchronized. */
+  if (n_readbacks_logged_ < 40) {
+    pending_readbacks_.push_back(&mem);
+  }
 }
 
 void *MetalDeviceQueue::copy_from_device_synchronized(device_memory &mem,
