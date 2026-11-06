@@ -25,6 +25,8 @@ jobs:
         shell: pwsh
         run: |
           $sw = [Diagnostics.Stopwatch]::StartNew()
+          # GitHub's mirror of Blender cannot serve the Git LFS assets (brushes); the build does not need them, so they are not downloaded.
+          $env:GIT_LFS_SKIP_SMUDGE = "1"
           git clone --depth 1 --branch ${{ inputs.tag }} https://github.com/blender/blender.git C:\b
           "clone: $($sw.Elapsed.TotalMinutes.ToString('0.0')) min"
           Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
