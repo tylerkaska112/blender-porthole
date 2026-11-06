@@ -83,10 +83,14 @@ jobs:
         if: ${{ inputs.targets == '' }}
         shell: pwsh
         run: |
-          $out = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName + "\bin\Release"
+          $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
+          $exe = Get-ChildItem "$dir\bin" -Recurse -Filter blender.exe | Select-Object -First 1
+          if (-not $exe) { Get-ChildItem $dir -Directory | Select-Object Name; throw "blender.exe not found under $dir\bin" }
+          $out = $exe.DirectoryName
+          "Blender folder: $out"
           Get-ChildItem $out | Select-Object -First 20 Name
-          $src = Get-ChildItem "$out\*\scripts\addons_core\cycles\source\kernel\device\metal" -ErrorAction SilentlyContinue
-          "Metal kernel sources installed: " + ($src | Measure-Object).Count
+          $src = Get-ChildItem $out -Recurse -Directory -Filter metal | Where-Object { $_.FullName -like "*cycles*kernel*" }
+          "Metal kernel folders installed: " + ($src | Measure-Object).Count
           Compress-Archive -Path "$out\*" -DestinationPath C:\blender-porthole-win-arm64.zip -CompressionLevel Optimal
           (Get-Item C:\blender-porthole-win-arm64.zip).Length / 1MB
 
