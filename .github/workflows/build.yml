@@ -67,6 +67,16 @@ jobs:
           bash cycles-metal-wm/apply.sh /c/b
           git -C /c/b status --short | head -20
 
+      - name: Drop /showFilenames from Blender's clang-cl flags (sccache does not know it and then refuses every compile)
+        shell: pwsh
+        run: |
+          $f = "C:\b\build_files\cmake\platform\platform_win32.cmake"
+          $t = Get-Content $f -Raw
+          $n = ([regex]::Matches($t, " /showFilenames")).Count
+          $t = $t -replace " /showFilenames", ""
+          Set-Content $f $t -NoNewline
+          "removed /showFilenames in $n place(s)"
+
       - name: Install sccache (native Arm64 build; Blender's make.bat has a switch for it)
         shell: pwsh
         run: |
