@@ -159,7 +159,7 @@ jobs:
           path: C:\blender-porthole-win-arm64.zip
           compression-level: 0
 
-      - name: Upload the symbols (to name a crash address: llvm-pdbutil dump -publics)
+      - name: Upload the symbols (name a crash address with llvm-pdbutil dump -publics)
         if: ${{ inputs.targets == '' }}
         uses: actions/upload-artifact@v4
         with:
