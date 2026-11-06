@@ -1,0 +1,103 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 141fdaf9..88b4e449 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -698,6 +698,7 @@ endif()
+ # Apple Metal
+ if(APPLE)
+   option(WITH_CYCLES_DEVICE_METAL "Enable Cycles Apple Metal compute support" ON)
++  option(WITH_CYCLES_DEVICE_METAL_WM "Use the Metal device written against winemetal (Porthole) instead of the Objective-C one" OFF)
+ endif()
+ 
+ # oneAPI
+diff --git a/intern/cycles/CMakeLists.txt b/intern/cycles/CMakeLists.txt
+index 77cad246..7598ecdb 100644
+--- a/intern/cycles/CMakeLists.txt
++++ b/intern/cycles/CMakeLists.txt
+@@ -274,6 +274,10 @@ endif()
+ 
+ if(WITH_CYCLES_DEVICE_METAL)
+   add_definitions(-DWITH_METAL)
++  if(WITH_CYCLES_DEVICE_METAL_WM AND APPLE)
++    # winemetal built natively for macOS (its calls are plain function calls, not imports of winemetal.dll)
++    add_definitions(-DDXMT_NATIVE=1)
++  endif()
+ endif()
+ 
+ if(WITH_CYCLES_DEVICE_ONEAPI)
+diff --git a/intern/cycles/bvh/CMakeLists.txt b/intern/cycles/bvh/CMakeLists.txt
+index 5b01017b..e4d77560 100644
+--- a/intern/cycles/bvh/CMakeLists.txt
++++ b/intern/cycles/bvh/CMakeLists.txt
+@@ -30,9 +30,15 @@ set(SRC_METAL
+ )
+ 
+ if(WITH_CYCLES_DEVICE_METAL)
+-  list(APPEND SRC
+-    ${SRC_METAL}
+-  )
++  if(WITH_CYCLES_DEVICE_METAL_WM)
++    list(APPEND SRC
++      metal_wm.cpp
++    )
++  else()
++    list(APPEND SRC
++      ${SRC_METAL}
++    )
++  endif()
+   add_definitions(-DWITH_METAL)
+ endif()
+ 
+diff --git a/intern/cycles/device/CMakeLists.txt b/intern/cycles/device/CMakeLists.txt
+index fdba8c60..cd3acfba 100644
+--- a/intern/cycles/device/CMakeLists.txt
++++ b/intern/cycles/device/CMakeLists.txt
+@@ -111,6 +111,16 @@ set(SRC_METAL
+   metal/util.h
+ )
+ 
++set(SRC_METAL_WM
++  metal_wm/device.cpp
++  metal_wm/device.h
++  metal_wm/device_impl.cpp
++  metal_wm/device_impl.h
++  metal_wm/queue.cpp
++  metal_wm/queue.h
++  metal_wm/wm.h
++)
++
+ set(SRC_OPTIX
+   optix/device.cpp
+   optix/device.h
+@@ -172,12 +182,25 @@ if(WITH_CYCLES_DEVICE_HIPRT)
+ endif()
+ 
+ if(WITH_CYCLES_DEVICE_METAL)
+-  list(APPEND LIB
+-    PRIVATE ${METAL_LIBRARY}
+-  )
+-  list(APPEND SRC
+-    ${SRC_METAL}
+-  )
++  if(WITH_CYCLES_DEVICE_METAL_WM)
++    # The Metal device written against winemetal (Porthole): no Objective-C, no Metal headers.
++    list(APPEND LIB
++      PRIVATE ${CYCLES_WINEMETAL_LIBRARIES}
++    )
++    list(APPEND INC_SYS
++      ${CYCLES_WINEMETAL_INCLUDE}
++    )
++    list(APPEND SRC
++      ${SRC_METAL_WM}
++    )
++  else()
++    list(APPEND LIB
++      PRIVATE ${METAL_LIBRARY}
++    )
++    list(APPEND SRC
++      ${SRC_METAL}
++    )
++  endif()
+ endif()
+ 
+ if(WITH_CYCLES_DEVICE_ONEAPI)
