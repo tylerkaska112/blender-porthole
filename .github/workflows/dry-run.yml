@@ -1,0 +1,62 @@
+name: dry-run (unmodified Blender 5.2.3, Windows Arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Blender tag to build
+        default: v5.2.3
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 350
+    steps:
+      - name: Machine
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List
+          "RAM GB: " + [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='Used GB';e={[math]::Round($_.Used/1GB,1)}}, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
+          Get-Command cl, cmake, ninja, git, python, git-lfs, svn -ErrorAction SilentlyContinue | Format-Table Name, Source
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -prerelease -format json | Select-String '"displayName"|"installationVersion"'
+
+      - name: Clone Blender (shallow)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          git clone --depth 1 --branch ${{ inputs.tag }} https://github.com/blender/blender.git C:\b
+          "clone: $($sw.Elapsed.TotalMinutes.ToString('0.0')) min"
+          Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
+
+      - name: Fetch Blender's prebuilt libraries (make update)
+        working-directory: C:\b
+        shell: cmd
+        run: |
+          set START=%TIME%
+          call make.bat update
+          echo update started %START% finished %TIME%
+        continue-on-error: true
+
+      - name: Disk after libraries
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
+          if (Test-Path C:\b\lib) { Get-ChildItem C:\b\lib | ForEach-Object { "{0}: {1} GB" -f $_.Name, [math]::Round(((Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum)/1GB,2) } }
+
+      - name: Build Blender (make.bat)
+        working-directory: C:\b
+        shell: cmd
+        run: |
+          set START=%TIME%
+          call make.bat nobuildinfo
+          echo build started %START% finished %TIME%
+        continue-on-error: true
+
+      - name: Result and disk
+        if: always()
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
+          Get-ChildItem C:\build* -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          Get-ChildItem C:\build*\bin\Release\blender.exe -ErrorAction SilentlyContinue | Format-List FullName, Length
