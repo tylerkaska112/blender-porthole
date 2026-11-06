@@ -54,27 +54,36 @@ jobs:
           bash cycles-metal-wm/apply.sh /c/b
           git -C /c/b status --short | head -20
 
-      - name: Configure and build
+      - name: Configure and build the whole of Blender
+        if: ${{ inputs.targets == '' }}
         working-directory: C:\b
         shell: cmd
         run: |
-          set START=%TIME%
-          if "${{ inputs.targets }}"=="" (
-            call make.bat ninja nobuildinfo
-          ) else (
-            call make.bat ninja nobuildinfo nobuild
-            for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath`) do set VSDIR=%%i
-            call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" arm64
-            cd /d C:\build_windows
-            ninja ${{ inputs.targets }}
-          )
-          echo build started %START% finished %TIME%
+          call make.bat ninja nobuildinfo
+
+      - name: Configure (quick check)
+        if: ${{ inputs.targets != '' }}
+        working-directory: C:\b
+        shell: cmd
+        run: |
+          call make.bat ninja nobuildinfo nobuild
+
+      - name: Build the chosen targets (quick check)
+        if: ${{ inputs.targets != '' }}
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath
+          $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
+          "build folder: $dir"
+          Select-String -Path "$dir\CMakeCache.txt" -Pattern "WITH_CYCLES_DEVICE_METAL" | ForEach-Object { $_.Line }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja ${{ inputs.targets }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package
         if: ${{ inputs.targets == '' }}
         shell: pwsh
         run: |
-          $out = "C:\build_windows\bin\Release"
+          $out = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName + "\bin\Release"
           Get-ChildItem $out | Select-Object -First 20 Name
           $src = Get-ChildItem "$out\*\scripts\addons_core\cycles\source\kernel\device\metal" -ErrorAction SilentlyContinue
           "Metal kernel sources installed: " + ($src | Measure-Object).Count
