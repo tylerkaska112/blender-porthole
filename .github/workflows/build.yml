@@ -121,21 +121,77 @@ jobs:
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja ${{ inputs.targets }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Why sccache refuses a compile (quick check only; one compile with debug logging)
+      - name: Which compiler flag makes sccache refuse (quick check only; removes one flag at a time from a real compile of an empty file)
         if: ${{ inputs.targets != '' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Argv {
+            [DllImport("shell32.dll", SetLastError = true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string cmd, out int n);
+            public static string[] Split(string cmd) {
+              int n; IntPtr p = CommandLineToArgvW(cmd, out n);
+              string[] r = new string[n];
+              for (int i = 0; i < n; i++) r[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(p, i * IntPtr.Size));
+              return r;
+            }
+          }
+          "@
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath
           $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
           Set-Content C:\env.cmd "@echo off`r`ncall `"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 >nul`r`ncd /d $dir"
           $cmds = cmd /c "C:\env.cmd && ninja -t commands ${{ inputs.targets }}"
           $line = ($cmds | Select-String -Pattern "^sccache" | Select-Object -Skip 1 -First 1).Line
-          # drop the object file first so the compile really runs, then run it with the debug log on
-          $obj = [regex]::Match($line, '/Fo(\S+)').Groups[1].Value
-          if ($obj) { Remove-Item (Join-Path $dir $obj) -ErrorAction SilentlyContinue }
-          Set-Content C:\one.cmd "@echo off`r`ncall C:\env.cmd`r`nset SCCACHE_DIR=C:\sccache-cache`r`nset SCCACHE_LOG=debug`r`nset SCCACHE_ERROR_LOG=C:\sccache-debug.log`r`nsccache --stop-server >nul 2>&1`r`n$line`r`nsccache --show-stats`r`nsccache --stop-server"
-          cmd /c C:\one.cmd 2>&1 | Select-Object -Last 40
-          if (Test-Path C:\sccache-debug.log) { Get-Content C:\sccache-debug.log | Select-String -Pattern "multiple|cannot|Cannot|non-cach|input|Raw" | Select-Object -First 30 | ForEach-Object { $t = $_.Line; "SCCACHE DEBUG HEAD: " + $t.Substring(0, [Math]::Min(300, $t.Length)); "SCCACHE DEBUG TAIL: " + $t.Substring([Math]::Max(0, $t.Length - 2500)) } } else { "no sccache debug log" }
+          $tok = [Argv]::Split($line)
+          $compiler = $tok[1]
+          $rest = @($tok[2..($tok.Length - 1)])
+          New-Item -ItemType Directory C:\diag -Force | Out-Null
+          Set-Content C:\diag\empty.cpp "int main_empty_for_sccache_diag = 0;"
+          # outputs go to C:\diag, the source is the empty file
+          $args2 = @()
+          foreach ($t in $rest) {
+            if ($t -like "/Fo*") { $args2 += "/FoC:\diag\x.obj" }
+            elseif ($t -like "/Fd*") { $args2 += "/FdC:\diag\x.pdb" }
+            elseif ($t -like "-clang:-MT*") { $args2 += "-clang:-MTx.obj" }
+            elseif ($t -like "-clang:-MF*") { $args2 += "-clang:-MFC:\diag\x.d" }
+            elseif ($t -like "*denoise.cpp" -or $t -like "*.cpp") { $args2 += "C:\diag\empty.cpp" }
+            else { $args2 += $t }
+          }
+          $env:SCCACHE_DIR = "C:\sccache-diag-cache"
+          & C:\sccache.exe --stop-server 2>$null | Out-Null
+          function NonCacheable($a) {
+            & C:\sccache.exe --zero-stats | Out-Null
+            Push-Location $dir
+            & C:\env.cmd 2>$null | Out-Null
+            & C:\sccache.exe $compiler @a 2>&1 | Out-Null
+            Pop-Location
+            $st = & C:\sccache.exe --show-stats
+            $m = ($st | Select-String "Non-cacheable calls\s+(\d+)")
+            if ($m) { return [int]$m.Matches[0].Groups[1].Value } else { return -1 }
+          }
+          # the compile needs the Visual Studio environment (INCLUDE, LIB): run it through a batch file
+          function NonCacheableBat($a) {
+            $q = ($a | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
+            Set-Content C:\diag\one.cmd "@echo off`r`ncall C:\env.cmd`r`nC:\sccache.exe `"$compiler`" $q"
+            & C:\sccache.exe --zero-stats | Out-Null
+            cmd /c C:\diag\one.cmd 2>&1 | Out-Null
+            $st = & C:\sccache.exe --show-stats
+            $m = ($st | Select-String "Non-cacheable calls\s+(\d+)")
+            $h = ($st | Select-String "Cache misses\s+(\d+)")
+            if ($m -and $h) { return @([int]$m.Matches[0].Groups[1].Value, [int]$h.Matches[0].Groups[1].Value) } else { return @(-1, -1) }
+          }
+          $base = NonCacheableBat $args2
+          "DIAG baseline (all flags, empty source): non-cacheable=$($base[0]) misses=$($base[1]) args=$($args2.Count)"
+          for ($i = 0; $i -lt $args2.Count; $i++) {
+            $a = @(); for ($j = 0; $j -lt $args2.Count; $j++) { if ($j -ne $i) { $a += $args2[$j] } }
+            $r = NonCacheableBat $a
+            if ($r[0] -eq 0) { "DIAG REMOVING THIS MAKES IT CACHEABLE: [$i] " + $args2[$i] + " (misses=$($r[1]))" }
+          }
+          "DIAG done"
+          & C:\sccache.exe --stop-server 2>$null | Out-Null
+          exit 0
 
       - name: Compiler cache statistics
         if: always()
