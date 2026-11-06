@@ -41,11 +41,22 @@ jobs:
           git lfs install --skip-repo
           git clone --depth 1 https://projects.blender.org/blender/lib-windows_arm64.git C:\b\lib\windows_arm64
 
-      - name: Pad the startup file (its real content is an LFS asset the build does not need; CMake only checks its size)
+      - name: Fetch Blender's own data files (Git LFS, from Blender's server; GitHub's mirror only has the pointers)
         shell: pwsh
         run: |
-          $f = "C:\b\release\datafiles\startup.blend"
-          if ((Get-Item $f).Length -lt 1024) { $fs = [IO.File]::OpenWrite($f); $fs.Seek(0, 'End') | Out-Null; $fs.Write((New-Object byte[] 4096), 0, 4096); $fs.Close() }
+          # Without these the startup file, the preview scenes, the matcaps and the brushes in the build are
+          # 130-byte pointer files and Blender dies at startup with a null pointer (seen on a phone, 2026-11-06).
+          Set-Location C:\b
+          git lfs install --local
+          git config lfs.url https://projects.blender.org/blender/blender.git/info/lfs
+          git lfs pull --include="release/*,assets/*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $magic = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("C:\b\release\datafiles\startup.blend")[0..6])
+          "startup.blend size: " + (Get-Item C:\b\release\datafiles\startup.blend).Length + ", starts with: " + $magic
+          if ($magic -ne "BLENDER") { throw "startup.blend is still an LFS pointer" }
+          $left = Get-ChildItem C:\b\release, C:\b\assets -Recurse -File | Where-Object { $_.Length -lt 200 -and (Get-Content $_.FullName -TotalCount 1 -ErrorAction SilentlyContinue) -like "version https://git-lfs*" }
+          "LFS pointers left under release/ and assets/: " + ($left | Measure-Object).Count
+          $left | Select-Object -First 10 FullName
 
       - name: Apply the Cycles Metal device for Porthole (over winemetal)
         shell: bash
