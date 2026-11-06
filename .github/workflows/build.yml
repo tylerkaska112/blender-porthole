@@ -67,23 +67,50 @@ jobs:
           bash cycles-metal-wm/apply.sh /c/b
           git -C /c/b status --short | head -20
 
+      - name: Install sccache (native Arm64 build; Blender's make.bat has a switch for it)
+        shell: pwsh
+        run: |
+          $v = "v0.19.0"
+          Invoke-WebRequest "https://github.com/mozilla/sccache/releases/download/$v/sccache-$v-aarch64-pc-windows-msvc.zip" -OutFile C:\sccache.zip
+          Expand-Archive C:\sccache.zip C:\sccache-unpack
+          $exe = Get-ChildItem C:\sccache-unpack -Recurse -Filter sccache.exe | Select-Object -First 1
+          Copy-Item $exe.FullName C:\sccache.exe
+          "C:\" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          & C:\sccache.exe --version
+
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\sccache-cache
+          key: sccache-${{ github.run_id }}
+          restore-keys: sccache-
+
       - name: Configure and build the whole of Blender
         if: ${{ inputs.targets == '' }}
         working-directory: C:\b
         shell: cmd
+        env:
+          SCCACHE_DIR: C:\sccache-cache
+          SCCACHE_CACHE_SIZE: 6G
         run: |
-          call make.bat ninja nobuildinfo
+          call make.bat ninja nobuildinfo sccache
 
       - name: Configure (quick check)
         if: ${{ inputs.targets != '' }}
         working-directory: C:\b
         shell: cmd
+        env:
+          SCCACHE_DIR: C:\sccache-cache
+          SCCACHE_CACHE_SIZE: 6G
         run: |
-          call make.bat ninja nobuildinfo nobuild
+          call make.bat ninja nobuildinfo nobuild sccache
 
       - name: Build the chosen targets (quick check)
         if: ${{ inputs.targets != '' }}
         shell: pwsh
+        env:
+          SCCACHE_DIR: C:\sccache-cache
+          SCCACHE_CACHE_SIZE: 6G
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath
           $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
@@ -91,6 +118,20 @@ jobs:
           Select-String -Path "$dir\CMakeCache.txt" -Pattern "WITH_CYCLES_DEVICE_METAL" | ForEach-Object { $_.Line }
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja ${{ inputs.targets }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compiler cache statistics
+        if: always()
+        shell: pwsh
+        run: |
+          $env:SCCACHE_DIR = "C:\sccache-cache"
+          if (Test-Path C:\sccache.exe) { & C:\sccache.exe --show-stats; & C:\sccache.exe --stop-server }
+
+      - name: Save the compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: C:\sccache-cache
+          key: sccache-${{ github.run_id }}
 
       - name: Package
         if: ${{ inputs.targets == '' }}
@@ -104,6 +145,9 @@ jobs:
           Get-ChildItem $out | Select-Object -First 20 Name
           $src = Get-ChildItem $out -Recurse -Directory -Filter metal | Where-Object { $_.FullName -like "*cycles*kernel*" }
           "Metal kernel folders installed: " + ($src | Measure-Object).Count
+          New-Item -ItemType Directory C:\symbols | Out-Null
+          Copy-Item "$out\blender.pdb" C:\symbols\blender.pdb
+          Get-ChildItem $out -Recurse -Filter *.pdb | Remove-Item -Force
           Compress-Archive -Path "$out\*" -DestinationPath C:\blender-porthole-win-arm64.zip -CompressionLevel Optimal
           (Get-Item C:\blender-porthole-win-arm64.zip).Length / 1MB
 
@@ -114,3 +158,10 @@ jobs:
           name: blender-porthole-win-arm64
           path: C:\blender-porthole-win-arm64.zip
           compression-level: 0
+
+      - name: Upload the symbols (to name a crash address: llvm-pdbutil dump -publics)
+        if: ${{ inputs.targets == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-porthole-win-arm64-symbols
+          path: C:\symbols\blender.pdb
