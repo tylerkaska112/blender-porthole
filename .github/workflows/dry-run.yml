@@ -57,6 +57,13 @@ jobs:
           Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
           if (Test-Path C:\b\lib) { Get-ChildItem C:\b\lib | ForEach-Object { "{0}: {1} GB" -f $_.Name, [math]::Round(((Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum)/1GB,2) } }
 
+      - name: Pad the startup file (its real content is an LFS asset the build does not need; CMake only checks its size)
+        shell: pwsh
+        run: |
+          $f = "C:\b\release\datafiles\startup.blend"
+          if ((Get-Item $f).Length -lt 1024) { $fs = [IO.File]::OpenWrite($f); $fs.Seek(0, 'End') | Out-Null; $fs.Write((New-Object byte[] 4096), 0, 4096); $fs.Close() }
+          (Get-Item $f).Length
+
       - name: Build Blender (make.bat)
         working-directory: C:\b
         shell: cmd
