@@ -21,6 +21,18 @@ jobs:
           Get-Command cl, cmake, ninja, git, python, git-lfs, svn -ErrorAction SilentlyContinue | Format-Table Name, Source
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -prerelease -format json | Select-String '"displayName"|"installationVersion"'
 
+      - name: Add the Clang compiler to Visual Studio (Blender builds Windows Arm64 with clang)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -property installationPath
+          "Visual Studio at $vs"
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset --quiet --norestart --noUpdateInstaller" -Wait -PassThru
+          "installer exit code: $($p.ExitCode) after $($sw.Elapsed.TotalMinutes.ToString('0.0')) min"
+          Get-ChildItem "$vs\VC\Tools\Llvm" -ErrorAction SilentlyContinue | Format-Table Name
+          Get-ChildItem "$vs\MSBuild\Microsoft\VC\*\Platforms\ARM64\PlatformToolsets" -ErrorAction SilentlyContinue | Format-Table Name
+
       - name: Clone Blender (shallow)
         shell: pwsh
         run: |
