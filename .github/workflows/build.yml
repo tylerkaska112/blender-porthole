@@ -116,6 +116,8 @@ jobs:
           $dir = (Get-ChildItem C:\build_windows* -Directory | Select-Object -First 1).FullName
           "build folder: $dir"
           Select-String -Path "$dir\CMakeCache.txt" -Pattern "WITH_CYCLES_DEVICE_METAL" | ForEach-Object { $_.Line }
+          # what the compiler is really called with (to see why sccache may refuse a compile)
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja -t commands ${{ inputs.targets }}" | Select-String -Pattern "sccache" | Select-Object -First 2 | ForEach-Object { "COMPILE COMMAND: " + $_.Line.Substring(0, [Math]::Min(6000, $_.Line.Length)) }
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 && cd /d $dir && ninja ${{ inputs.targets }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
