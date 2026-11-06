@@ -135,7 +135,7 @@ jobs:
           if ($obj) { Remove-Item (Join-Path $dir $obj) -ErrorAction SilentlyContinue }
           Set-Content C:\one.cmd "@echo off`r`ncall C:\env.cmd`r`nset SCCACHE_DIR=C:\sccache-cache`r`nset SCCACHE_LOG=debug`r`nset SCCACHE_ERROR_LOG=C:\sccache-debug.log`r`nsccache --stop-server >nul 2>&1`r`n$line`r`nsccache --show-stats`r`nsccache --stop-server"
           cmd /c C:\one.cmd 2>&1 | Select-Object -Last 40
-          if (Test-Path C:\sccache-debug.log) { Get-Content C:\sccache-debug.log | Select-String -Pattern "multiple|cannot|Cannot|non-cach|input|Raw" | Select-Object -First 30 | ForEach-Object { "SCCACHE DEBUG: " + $_.Line.Substring(0, [Math]::Min(1500, $_.Line.Length)) } } else { "no sccache debug log" }
+          if (Test-Path C:\sccache-debug.log) { Get-Content C:\sccache-debug.log | Select-String -Pattern "multiple|cannot|Cannot|non-cach|input|Raw" | Select-Object -First 30 | ForEach-Object { $t = $_.Line; "SCCACHE DEBUG HEAD: " + $t.Substring(0, [Math]::Min(300, $t.Length)); "SCCACHE DEBUG TAIL: " + $t.Substring([Math]::Max(0, $t.Length - 2500)) } } else { "no sccache debug log" }
 
       - name: Compiler cache statistics
         if: always()
@@ -143,6 +143,7 @@ jobs:
         run: |
           $env:SCCACHE_DIR = "C:\sccache-cache"
           if (Test-Path C:\sccache.exe) { & C:\sccache.exe --show-stats; & C:\sccache.exe --stop-server }
+          exit 0
 
       - name: Save the compiler cache
         if: always()
