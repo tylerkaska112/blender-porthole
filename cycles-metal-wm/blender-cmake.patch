@@ -1,12 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 141fdaf9..88b4e449 100644
+index 141fdaf9..0026100b 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -698,6 +698,7 @@ endif()
+@@ -698,6 +698,13 @@ endif()
  # Apple Metal
  if(APPLE)
    option(WITH_CYCLES_DEVICE_METAL "Enable Cycles Apple Metal compute support" ON)
 +  option(WITH_CYCLES_DEVICE_METAL_WM "Use the Metal device written against winemetal (Porthole) instead of the Objective-C one" OFF)
++elseif(WIN32)
++  # Windows programs running under Porthole reach the Mac's GPU through winemetal.
++  option(WITH_CYCLES_DEVICE_METAL_WM "Cycles Metal device written against winemetal (Porthole)" ON)
++  if(WITH_CYCLES_DEVICE_METAL_WM)
++    set(WITH_CYCLES_DEVICE_METAL ON)
++  endif()
  endif()
  
  # oneAPI
@@ -48,8 +54,21 @@ index 5b01017b..e4d77560 100644
    add_definitions(-DWITH_METAL)
  endif()
  
+diff --git a/intern/cycles/cmake/external_libs.cmake b/intern/cycles/cmake/external_libs.cmake
+index cc0e4bbc..e0e19eda 100644
+--- a/intern/cycles/cmake/external_libs.cmake
++++ b/intern/cycles/cmake/external_libs.cmake
+@@ -57,7 +57,7 @@ endif()
+ # Metal
+ ###########################################################################
+ 
+-if(WITH_CYCLES_DEVICE_METAL)
++if(WITH_CYCLES_DEVICE_METAL AND NOT WITH_CYCLES_DEVICE_METAL_WM)
+   find_library(METAL_LIBRARY Metal)
+ 
+   # This file was added in the 12.0 SDK, use it as a way to detect the version.
 diff --git a/intern/cycles/device/CMakeLists.txt b/intern/cycles/device/CMakeLists.txt
-index fdba8c60..cd3acfba 100644
+index fdba8c60..ad36582d 100644
 --- a/intern/cycles/device/CMakeLists.txt
 +++ b/intern/cycles/device/CMakeLists.txt
 @@ -111,6 +111,16 @@ set(SRC_METAL
@@ -69,7 +88,7 @@ index fdba8c60..cd3acfba 100644
  set(SRC_OPTIX
    optix/device.cpp
    optix/device.h
-@@ -172,12 +182,25 @@ if(WITH_CYCLES_DEVICE_HIPRT)
+@@ -172,12 +182,34 @@ if(WITH_CYCLES_DEVICE_HIPRT)
  endif()
  
  if(WITH_CYCLES_DEVICE_METAL)
@@ -81,12 +100,21 @@ index fdba8c60..cd3acfba 100644
 -  )
 +  if(WITH_CYCLES_DEVICE_METAL_WM)
 +    # The Metal device written against winemetal (Porthole): no Objective-C, no Metal headers.
-+    list(APPEND LIB
-+      PRIVATE ${CYCLES_WINEMETAL_LIBRARIES}
++    # metal_wm/winemetal holds the interface subset it needs; on Windows its implementation talks to
++    # winemetal's unix side directly, on macOS (tests) the native winemetal library is linked.
++    list(APPEND INC
++      metal_wm/winemetal
 +    )
-+    list(APPEND INC_SYS
-+      ${CYCLES_WINEMETAL_INCLUDE}
-+    )
++    if(WIN32)
++      list(APPEND SRC
++        metal_wm/winemetal/winemetal_win.cpp
++        metal_wm/winemetal/winemetal.h
++      )
++    else()
++      list(APPEND LIB
++        PRIVATE ${CYCLES_WINEMETAL_LIBRARIES}
++      )
++    endif()
 +    list(APPEND SRC
 +      ${SRC_METAL_WM}
 +    )

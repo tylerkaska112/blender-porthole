@@ -4,4 +4,4 @@ set -eu
 B="${1:?blender source dir}"; H="$(cd "$(dirname "$0")" && pwd)"
 cp -R "$H/files/." "$B/"
 ( cd "$B" && git apply --whitespace=nowarn "$H/blender-cmake.patch" )
-echo "applied: configure with -DWITH_CYCLES_DEVICE_METAL_WM=ON -DCYCLES_WINEMETAL_INCLUDE=<winemetal headers> -DCYCLES_WINEMETAL_LIBRARIES=<libraries>"
+echo "applied. Windows: the device is on by default (WITH_CYCLES_DEVICE_METAL_WM). macOS test builds: -DWITH_CYCLES_DEVICE_METAL_WM=ON -DCYCLES_WINEMETAL_LIBRARIES=<native winemetal library>"
