@@ -43,14 +43,13 @@ jobs:
           "clone: $($sw.Elapsed.TotalMinutes.ToString('0.0')) min"
           Get-PSDrive C | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}
 
-      - name: Fetch Blender's prebuilt libraries (make update)
-        working-directory: C:\b
-        shell: cmd
+      - name: Fetch Blender's prebuilt libraries (cloned from Blender's own server, Git LFS)
+        shell: pwsh
         run: |
-          set START=%TIME%
-          call make.bat update
-          echo update started %START% finished %TIME%
-        continue-on-error: true
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          git lfs install --skip-repo
+          git clone --depth 1 https://projects.blender.org/blender/lib-windows_arm64.git C:\b\lib\windows_arm64
+          "libraries: $($sw.Elapsed.TotalMinutes.ToString('0.0')) min, exit $LASTEXITCODE"
 
       - name: Disk after libraries
         shell: pwsh
@@ -63,7 +62,7 @@ jobs:
         shell: cmd
         run: |
           set START=%TIME%
-          call make.bat nobuildinfo
+          call make.bat ninja nobuildinfo
           echo build started %START% finished %TIME%
         continue-on-error: true
 
