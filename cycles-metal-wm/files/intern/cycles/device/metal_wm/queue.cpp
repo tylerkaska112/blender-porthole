@@ -21,12 +21,25 @@ MetalDeviceQueue::MetalDeviceQueue(MetalDevice *device)
 
 MetalDeviceQueue::~MetalDeviceQueue()
 {
+  /* An encoder that is released without endEncoding aborts the process (Metal assertion), also after an error. */
+  close_compute_encoder();
+  close_blit_encoder();
   synchronize();
 }
 
 int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
 {
+#  ifdef _WIN32
+  /* Under Porthole (a phone): 524288 paths keep the viewport and a final render inside the memory limit. */
+  size_t state_count = 524288;
+#  else
   size_t state_count = 4194304;
+#  endif
+  if (auto *str = getenv("CYCLES_METAL_MAX_STATES")) {
+    if (atol(str) > 0) {
+      state_count = size_t(atol(str));
+    }
+  }
 
   const size_t max_recommended_working_set = metal_device_->recommended_working_set();
 
@@ -39,8 +52,9 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
 
   /* Calculate how many states fit in the memory that is left. */
   size_t max_safe_state_count = 0;
-  if (stats_.mem_used < max_working_set) {
-    const size_t headroom = max_working_set - stats_.mem_used;
+  const size_t mem_used = metal_device_->total_mem_used();
+  if (mem_used < max_working_set) {
+    const size_t headroom = max_working_set - mem_used;
     max_safe_state_count = headroom / state_size;
   }
 
@@ -68,6 +82,12 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
     state_count = 0;
   }
 
+  fprintf(stderr,
+          "[cycles-wm] integrator states: %zu x %zu bytes, budget %zu MB, in use %zu MB\n",
+          size_t(state_count),
+          size_t(state_size),
+          max_recommended_working_set >> 20,
+          mem_used >> 20);
   return state_count;
 }
 
@@ -325,12 +345,13 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
 
 bool MetalDeviceQueue::synchronize()
 {
+  /* Always end the open encoders, even when the device is in error: dropping one open aborts the process. */
+  close_compute_encoder();
+  close_blit_encoder();
+
   if (metal_device_->have_error()) {
     return false;
   }
-
-  close_compute_encoder();
-  close_blit_encoder();
 
   if (mtlCommandBuffer_) {
     MTLCommandBuffer_commit(mtlCommandBuffer_);

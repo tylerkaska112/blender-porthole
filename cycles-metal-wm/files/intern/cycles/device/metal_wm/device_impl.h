@@ -7,8 +7,11 @@
 
 #ifdef WITH_METAL
 
+#  include <atomic>
 #  include <map>
 #  include <mutex>
+#  include <thread>
+#  include <vector>
 
 #  include "device/device.h"
 #  include "device/memory.h"
@@ -55,6 +58,18 @@ class MetalDevice : public Device {
   bool use_metalrt = false;
 
   MetalPipeline pipelines[DEVICE_KERNEL_NUM];
+  std::mutex pipeline_mutex;
+
+  /* The pipelines are built up front on a few threads (the first sample would otherwise wait for all of them,
+   * one after the other, and Blender would show nothing). is_ready() reports the progress. */
+  std::vector<std::thread> precompile_threads;
+  std::atomic<int> precompile_next{0};
+  std::atomic<int> precompile_done{0};
+  std::atomic<int> precompile_active{0};
+  int precompile_total = 0;
+  void start_precompile();
+  void join_precompile();
+  bool build_pipeline(DeviceKernel kernel, MetalPipeline &out, string &error_text);
 
   struct MetalMem {
     device_memory *mem = nullptr;
@@ -159,6 +174,8 @@ class MetalDevice : public Device {
   void prepare_residency();
 
   size_t recommended_working_set() const;
+  /* What all live Metal devices of this process hold (the viewport and a final render are two devices). */
+  size_t total_mem_used() const;
 
   string preprocess_source();
   bool compile_library();

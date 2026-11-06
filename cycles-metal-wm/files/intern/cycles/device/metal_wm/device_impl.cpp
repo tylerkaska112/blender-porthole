@@ -5,6 +5,9 @@
 
 #ifdef WITH_METAL
 
+#  include <algorithm>
+#  include <vector>
+
 #  include "device/metal_wm/device_impl.h"
 #  include "device/metal_wm/queue.h"
 
@@ -17,6 +20,10 @@
 #  include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
+
+/* Every MetalDevice that is alive: the viewport and a final render are two devices on one GPU and one process memory limit. */
+static std::mutex g_devices_mutex;
+static std::vector<const MetalDevice *> g_devices;
 
 void MetalDevice::set_error(const string &error)
 {
@@ -36,6 +43,11 @@ void MetalDevice::set_error(const string &error)
 MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profiler, bool headless)
     : Device(info, stats, profiler, headless), image_info(this, "image_info", MEM_GLOBAL)
 {
+  {
+    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    g_devices.push_back(this);
+  }
+
   const vector<obj_handle_t> &all = wm::devices();
   assert(info.num >= 0 && info.num < (int)all.size());
   mtlDevice = all[info.num];
@@ -64,10 +76,21 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
     memset(launch_params, 0, sizeof(KernelParamsMetal));
   }
   prepare_residency();
+
+  fprintf(stderr,
+          "[cycles-wm] device \"%s\", working set %zu MB (Metal reports %zu MB)\n",
+          wm::device_name(mtlDevice).c_str(),
+          recommended_working_set() >> 20,
+          size_t(MTLDevice_recommendedMaxWorkingSetSize(mtlDevice)) >> 20);
 }
 
 MetalDevice::~MetalDevice()
 {
+  {
+    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    g_devices.erase(std::remove(g_devices.begin(), g_devices.end(), this), g_devices.end());
+  }
+  join_precompile();
   image_info.free();
   for (MetalPipeline &p : pipelines) {
     wm::release(p.pipeline);
@@ -83,7 +106,37 @@ MetalDevice::~MetalDevice()
 
 size_t MetalDevice::recommended_working_set() const
 {
-  return MTLDevice_recommendedMaxWorkingSetSize(mtlDevice);
+  /* CYCLES_METAL_WORKING_SET_MB sets the budget outright. */
+  if (const char *str = getenv("CYCLES_METAL_WORKING_SET_MB")) {
+    const long mb = atol(str);
+    if (mb > 0) {
+      return size_t(mb) << 20;
+    }
+  }
+
+  size_t budget = MTLDevice_recommendedMaxWorkingSetSize(mtlDevice);
+
+#  ifdef _WIN32
+  /* Under Porthole this number is the video memory a Windows GAME can afford: the process limit minus the
+   * RAM the game is told it has, minus the runtime's own cost, with a floor of 1 GB (seen on an iPhone 15
+   * Pro: 1024 MB while Metal itself recommends 5461 MB). Cycles keeps nothing in guest RAM, so it gets at
+   * least 2.5 GB; the process limit stays the real ceiling and CYCLES_METAL_WORKING_SET_MB moves it. */
+  const size_t floor_budget = size_t(2560) << 20;
+  if (budget < floor_budget) {
+    budget = floor_budget;
+  }
+#  endif
+  return budget;
+}
+
+size_t MetalDevice::total_mem_used() const
+{
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  size_t total = 0;
+  for (const MetalDevice *device : g_devices) {
+    total += device->stats.mem_used;
+  }
+  return max(total, size_t(stats.mem_used));
 }
 
 void MetalDevice::metal_mem_alloc(const wm::Buffer &buffer)
@@ -176,6 +229,7 @@ bool MetalDevice::compile_library()
   if (mtlLibrary && key == library_features_key) {
     return true;
   }
+  join_precompile();
   library_features_key = key;
   wm::release(mtlLibrary);
 
@@ -184,7 +238,7 @@ bool MetalDevice::compile_library()
   mtlLibrary = MTLDevice_newLibraryWithSource(
       mtlDevice, source.data(), source.size(), 0x0302, WMT_LIBRARY_FLAG_FAST_MATH, &error);
   const string text_error = wm::error_text(error);
-  LOG_INFO << "Front-end compilation finished in " << (time_dt() - starttime) << " seconds";
+  fprintf(stderr, "[cycles-wm] kernel library compiled in %.2f s\n", time_dt() - starttime);
 
   if (!mtlLibrary) {
     set_error(string_printf("Failed to compile library:\n%s", text_error.c_str()));
@@ -196,6 +250,7 @@ bool MetalDevice::compile_library()
     wm::release(p.function);
     p = MetalPipeline();
   }
+  start_precompile();
   return true;
 }
 
@@ -211,25 +266,22 @@ bool MetalDevice::is_ready(string &status) const
     return true;
   }
   status = "";
+  if (precompile_active.load() > 0) {
+    status = string_printf("Compiling render kernels %d/%d (the first time takes a few minutes)",
+                           precompile_done.load(),
+                           precompile_total);
+    return false;
+  }
   return mtlLibrary != 0;
 }
 
-const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
+bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, string &error_text)
 {
-  MetalPipeline &p = pipelines[kernel];
-  if (p.pipeline) {
-    return &p;
-  }
-  if (p.failed || !mtlLibrary) {
-    return nullptr;
-  }
-
   const string function_name = string("cycles_metal_") + device_kernel_as_string(kernel);
   p.function = MTLLibrary_newFunction(mtlLibrary, function_name.c_str());
   if (!p.function) {
-    p.failed = true;
-    set_error(string_printf("Could not find the Metal function \"%s\"", function_name.c_str()));
-    return nullptr;
+    error_text = string_printf("Could not find the Metal function \"%s\"", function_name.c_str());
+    return false;
   }
 
   /* Cycles tunes the threadgroup size per GPU generation and kernel (a copy of the table in the
@@ -319,14 +371,14 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
   p.pipeline = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
   const string text_error = wm::error_text(error);
   if (!p.pipeline) {
-    p.failed = true;
-    set_error(string_printf("Failed to build the pipeline for %s:\n%s",
-                            device_kernel_as_string(kernel),
-                            text_error.c_str()));
-    return nullptr;
+    error_text = string_printf(
+        "Failed to build the pipeline for %s:\n%s", device_kernel_as_string(kernel), text_error.c_str());
+    return false;
   }
-  LOG_TRACE << "Pipeline " << device_kernel_as_string(kernel) << " built in "
-            << (time_dt() - starttime) << " s";
+  fprintf(stderr,
+          "[cycles-wm] pipeline %s built in %.2f s\n",
+          device_kernel_as_string(kernel),
+          time_dt() - starttime);
 
   if (!num_threads_per_block) {
     WMTComputePipelineLimits limits = {};
@@ -336,7 +388,131 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
     num_threads_per_block = std::max(num_threads_per_block, (int)limits.thread_execution_width);
   }
   p.num_threads_per_block = num_threads_per_block;
-  return &p;
+  return true;
+}
+
+const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
+{
+  MetalPipeline &p = pipelines[kernel];
+  {
+    std::lock_guard<std::mutex> lock(pipeline_mutex);
+    if (p.pipeline) {
+      return &p;
+    }
+    if (p.failed || !mtlLibrary) {
+      return nullptr;
+    }
+  }
+
+  /* Built outside the lock: the threads that build them up front work in parallel. */
+  MetalPipeline built;
+  string error_text;
+  const bool ok = build_pipeline(kernel, built, error_text);
+
+  {
+    std::lock_guard<std::mutex> lock(pipeline_mutex);
+    if (p.pipeline) { /* another thread was first */
+      wm::release(built.pipeline);
+      wm::release(built.function);
+      return &p;
+    }
+    if (ok) {
+      p = built;
+      return &p;
+    }
+    p.failed = true;
+  }
+  wm::release(built.function);
+  set_error(error_text);
+  return nullptr;
+}
+
+/* ---- building the pipelines up front ---- */
+
+void MetalDevice::join_precompile()
+{
+  for (std::thread &t : precompile_threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  precompile_threads.clear();
+  precompile_active = 0;
+}
+
+void MetalDevice::start_precompile()
+{
+  join_precompile();
+  if (!mtlLibrary) {
+    return;
+  }
+
+  /* The kernels nearly every render uses (a plain surface scene with lights). The rest (volumes, MNEE, raytrace
+   * shading, subsurface, bake, denoising helpers) are built the first time a scene needs them: building all 77
+   * took 244 s of compile time on an M4. */
+  static const DeviceKernel core[] = {
+      DEVICE_KERNEL_INTEGRATOR_RESET,
+      DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA,
+      DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST,
+      DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW,
+      DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND,
+      DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE,
+      DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE,
+      DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW,
+      DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_QUEUED_SHADOW_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_ACTIVE_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_TERMINATED_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_TERMINATED_SHADOW_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_SORTED_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_SORT_BUCKET_PASS,
+      DEVICE_KERNEL_INTEGRATOR_SORT_WRITE_PASS,
+      DEVICE_KERNEL_INTEGRATOR_COMPACT_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_COMPACT_STATES,
+      DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_PATHS_ARRAY,
+      DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_STATES,
+      DEVICE_KERNEL_SHADER_EVAL_BACKGROUND,
+      DEVICE_KERNEL_PREFIX_SUM,
+  };
+  precompile_next = 0;
+  precompile_done = 0;
+  precompile_total = int(sizeof(core) / sizeof(core[0]));
+  int workers = 3;
+  if (const char *str = getenv("CYCLES_METAL_COMPILE_THREADS")) {
+    workers = std::max(0, std::min(8, atoi(str)));
+  }
+  if (workers == 0) {
+    return; /* every pipeline is then built the first time it is used */
+  }
+  precompile_active = workers;
+  fprintf(stderr, "[cycles-wm] building %d core kernel pipelines on %d threads\n", precompile_total, workers);
+
+  for (int w = 0; w < workers; w++) {
+    precompile_threads.emplace_back([this, w]() {
+      (void)w;
+      const double started = time_dt();
+      for (;;) {
+        const int index = precompile_next.fetch_add(1);
+        if (index >= precompile_total) {
+          break;
+        }
+        const DeviceKernel kernel = core[index];
+        if (!have_error()) {
+          /* Kernels the library does not have are skipped here; the queue reports the ones it needs. */
+          const string function_name = string("cycles_metal_") + device_kernel_as_string(kernel);
+          obj_handle_t probe = MTLLibrary_newFunction(mtlLibrary, function_name.c_str());
+          if (probe) {
+            wm::release(probe);
+            get_pipeline(kernel);
+          }
+        }
+        precompile_done++;
+      }
+      if (--precompile_active == 0) {
+        fprintf(stderr, "[cycles-wm] all kernel pipelines ready (%.1f s)\n", time_dt() - started);
+      }
+    });
+  }
 }
 
 unique_ptr<DeviceQueue> MetalDevice::gpu_queue_create()
@@ -410,7 +586,13 @@ MetalDevice::MetalMem *MetalDevice::generic_alloc(device_memory &mem)
   MetalMem *mmem_ptr = mmem.get();
   metal_mem_map[&mem] = std::move(mmem);
 
-  if (stats.mem_used > recommended_working_set()) {
+  if (total_mem_used() > recommended_working_set()) {
+    fprintf(stderr,
+            "[cycles-wm] out of GPU memory: %zu MB in use by all devices, budget %zu MB, last allocation %s (%zu MB)\n",
+            total_mem_used() >> 20,
+            recommended_working_set() >> 20,
+            mem.log_name().c_str(),
+            size >> 20);
     set_error("System is out of GPU memory");
     return nullptr;
   }
@@ -757,7 +939,7 @@ void MetalDevice::image_alloc(device_image &mem)
   image_info[image_info_id] = mem.info;
   image_info[image_info_id].data = uint64_t(image_info_id) | (sampler_index << 32);
 
-  if (stats.mem_used > recommended_working_set()) {
+  if (total_mem_used() > recommended_working_set()) {
     set_error("System is out of GPU memory");
   }
 }
