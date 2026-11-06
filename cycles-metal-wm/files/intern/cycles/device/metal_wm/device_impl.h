@@ -72,6 +72,21 @@ class MetalDevice : public Device {
   device_vector<KernelImageInfo> image_info;
   wm::Buffer image_bindings;
 
+  /* What each image id points at: a 2D texture (its GPU resource id goes into the bindings
+   * buffer) or a linear buffer (1D images: its GPU address goes into the image info). */
+  struct ImageRes {
+    obj_handle_t handle = 0;
+    uint64_t gpu_id = 0;
+    uint64_t gpu_address = 0;
+    bool is_buffer = false;
+  };
+  vector<ImageRes> image_res;
+  struct TextureMem {
+    obj_handle_t handle = 0;
+    size_t size = 0;
+  };
+  map<device_memory *, TextureMem> texture_map;
+
   bool has_error = false;
 
   MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profiler, bool headless);
@@ -116,7 +131,14 @@ class MetalDevice : public Device {
   void global_alloc(device_memory &mem);
   void global_free(device_memory &mem);
   void image_alloc(device_image &mem);
+  void image_alloc_as_buffer(device_image &mem);
+  void image_copy_to(device_image &mem);
   void image_free(device_image &mem);
+  void image_res_grow(const uint image_info_id);
+  bool is_texture(const KernelImageInfo &info) const
+  {
+    return info.height > 0;
+  }
 
   bool has_unified_memory_any() const override
   {
@@ -132,6 +154,7 @@ class MetalDevice : public Device {
 
   /* Memory the GPU may use: kept in one residency set that the queue holds. */
   void metal_mem_alloc(const wm::Buffer &buffer);
+  void metal_mem_alloc(obj_handle_t handle, size_t size);
   void metal_mem_free(obj_handle_t &handle, size_t size);
   void prepare_residency();
 

@@ -98,6 +98,18 @@ void MetalDevice::metal_mem_alloc(const wm::Buffer &buffer)
   }
 }
 
+void MetalDevice::metal_mem_alloc(obj_handle_t handle, const size_t size)
+{
+  if (handle) {
+    stats.mem_alloc(size);
+    if (mtlResidencySet) {
+      std::lock_guard<std::mutex> lock(residency_mutex);
+      MTLResidencySet_addAllocation(mtlResidencySet, handle);
+      residency_dirty = true;
+    }
+  }
+}
+
 void MetalDevice::metal_mem_free(obj_handle_t &handle, const size_t size)
 {
   if (handle) {
@@ -220,12 +232,81 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
     return nullptr;
   }
 
-  /* Cycles tunes some GPUs for 64 threads per threadgroup; the others use what the pipeline allows. */
+  /* Cycles tunes the threadgroup size per GPU generation and kernel (a copy of the table in the
+   * original Metal device). The sort passes REQUIRE 1024 threads per group: the kernel derives
+   * its partition from the group index, and any other size writes outside the offsets buffer. */
   int threads_per_threadgroup = max_threads_per_threadgroup;
   int num_threads_per_block = 0;
-  if (apple9) {
-    threads_per_threadgroup = 64;
-    num_threads_per_block = 64;
+  {
+    struct Tuning {
+      int threads_per_threadgroup;
+      int num_threads_per_block;
+    };
+    Tuning t = {0, 0};
+    const string name = wm::device_name(mtlDevice);
+    const bool is_m1 = name.find("M1") != string::npos;
+    const bool is_m2 = name.find("M2") != string::npos;
+    const bool m2_big = is_m2 && (name.find("Pro") != string::npos ||
+                                  name.find("Max") != string::npos ||
+                                  name.find("Ultra") != string::npos);
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_SORT_BUCKET_PASS ||
+        kernel == DEVICE_KERNEL_INTEGRATOR_SORT_WRITE_PASS)
+    {
+      t = {1024, 1024};
+    }
+    else if (is_m1) {
+      switch (kernel) {
+        case DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_STATES: t = {256, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA: t = {768, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST: t = {512, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW: t = {384, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE: t = {512, 64}; break;
+        case DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY: t = {512, 256}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND: t = {512, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW: t = {384, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE: t = {576, 384}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SORTED_PATHS_ARRAY: t = {832, 832}; break;
+        default: break;
+      }
+    }
+    else if (is_m2 && m2_big) {
+      switch (kernel) {
+        case DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_STATES: t = {384, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA: t = {640, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST: t = {1024, 64}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW: t = {704, 704}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE: t = {640, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY: t = {896, 768}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND: t = {512, 128}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW: t = {32, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE: t = {768, 576}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SORTED_PATHS_ARRAY: t = {896, 768}; break;
+        default: break;
+      }
+    }
+    else if (is_m2) {
+      switch (kernel) {
+        case DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_STATES: t = {32, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA: t = {832, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST: t = {64, 64}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW: t = {64, 64}; break;
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE: t = {704, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_QUEUED_PATHS_ARRAY: t = {1024, 256}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND: t = {64, 32}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW: t = {256, 256}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE: t = {448, 384}; break;
+        case DEVICE_KERNEL_INTEGRATOR_SORTED_PATHS_ARRAY: t = {1024, 1024}; break;
+        default: break;
+      }
+    }
+    else {
+      /* M3 and later (and every other GPU): peak occupancy through Dynamic Caching. */
+      t = {64, 64};
+    }
+    if (t.threads_per_threadgroup) {
+      threads_per_threadgroup = t.threads_per_threadgroup;
+      num_threads_per_block = t.num_threads_per_block;
+    }
   }
 
   WMTComputePipelineInfoEx info = {};
@@ -397,7 +478,10 @@ void MetalDevice::mem_copy_to(device_memory &mem)
       generic_alloc(mem);
     }
   }
-  /* Shared buffers: the host side already is the buffer. */
+  else if (mem.type == MEM_IMAGE_TEXTURE) {
+    image_copy_to((device_image &)mem);
+  }
+  /* Other shared buffers: the host side already is the buffer. */
 }
 
 void MetalDevice::mem_move_to_host(device_memory & /*mem*/)
@@ -506,25 +590,245 @@ void MetalDevice::global_free(device_memory &mem)
   }
 }
 
+void MetalDevice::image_res_grow(const uint image_info_id)
+{
+  if (image_info_id >= image_info.size()) {
+    /* Geometric growth to amortize reallocation cost. */
+    const size_t new_size = max(size_t(image_info_id) + 128, image_info.size() * 2);
+    image_info.resize(new_size);
+  }
+  if (image_info_id >= image_res.size()) {
+    image_res.resize(max(size_t(image_info.size()), size_t(image_info_id) + 1));
+  }
+  const size_t needed = sizeof(uint64_t) * image_res.size();
+  if (needed > image_bindings.size) {
+    /* The bindings buffer grows with the image count; the queue refills it before each run. */
+    metal_mem_free(image_bindings.handle, image_bindings.size);
+    image_bindings = wm::new_buffer(mtlDevice, needed);
+    metal_mem_alloc(image_bindings);
+    if (image_bindings.contents) {
+      memset(image_bindings.contents, 0, image_bindings.size);
+    }
+  }
+}
+
+void MetalDevice::image_alloc_as_buffer(device_image &mem)
+{
+  generic_alloc(mem);
+
+  std::lock_guard<std::recursive_mutex> lock(metal_mem_map_mutex);
+  const uint image_info_id = mem.image_info_id;
+  image_res_grow(image_info_id);
+
+  auto it = metal_mem_map.find(&mem);
+  if (it == metal_mem_map.end()) {
+    return;
+  }
+  ImageRes &res = image_res[image_info_id];
+  res = ImageRes();
+  res.handle = it->second->buffer.handle;
+  res.gpu_address = it->second->buffer.gpu_address;
+  res.is_buffer = true;
+  image_info[image_info_id] = mem.info;
+}
+
 void MetalDevice::image_alloc(device_image &mem)
 {
-  /* Textures are not in this port yet. */
-  (void)mem;
-  set_error("Image textures are not supported by this Metal device yet");
+  /* Same limits as the original Metal device. 1D images are linear buffers. */
+  if (mem.data_height > 0) {
+    if (mem.data_width > 16384 || mem.data_height > 16384) {
+      set_error(string_printf(
+          "Texture exceeds maximum allowed size of 16384 x 16384 (requested: %zu x %zu)",
+          mem.data_width,
+          mem.data_height));
+      return;
+    }
+  }
+  else {
+    image_alloc_as_buffer(mem);
+    return;
+  }
+
+  const size_t size = mem.memory_size();
+
+  /* sampler_index maps into the kernel's constant 'metal_samplers' array. */
+  uint64_t sampler_index = mem.info.extension;
+  if (mem.info.interpolation != INTERPOLATION_CLOSEST) {
+    sampler_index += 4;
+  }
+
+  /* data_elements is 1, 2 or 4 (index 2 = three elements is not used). */
+  static const WMTPixelFormat f_uchar[] = {
+      WMTPixelFormatR8Unorm, WMTPixelFormatRG8Unorm, WMTPixelFormatInvalid, WMTPixelFormatRGBA8Unorm};
+  static const WMTPixelFormat f_uint16[] = {WMTPixelFormatR16Unorm,
+                                            WMTPixelFormatRG16Unorm,
+                                            WMTPixelFormatInvalid,
+                                            WMTPixelFormatRGBA16Unorm};
+  static const WMTPixelFormat f_uint[] = {WMTPixelFormatR32Uint,
+                                          WMTPixelFormatRG32Uint,
+                                          WMTPixelFormatInvalid,
+                                          WMTPixelFormatRGBA32Uint};
+  static const WMTPixelFormat f_int[] = {WMTPixelFormatR32Sint,
+                                         WMTPixelFormatRG32Sint,
+                                         WMTPixelFormatInvalid,
+                                         WMTPixelFormatRGBA32Sint};
+  static const WMTPixelFormat f_float[] = {WMTPixelFormatR32Float,
+                                           WMTPixelFormatRG32Float,
+                                           WMTPixelFormatInvalid,
+                                           WMTPixelFormatRGBA32Float};
+  static const WMTPixelFormat f_half[] = {WMTPixelFormatR16Float,
+                                          WMTPixelFormatRG16Float,
+                                          WMTPixelFormatInvalid,
+                                          WMTPixelFormatRGBA16Float};
+
+  WMTPixelFormat format = WMTPixelFormatInvalid;
+  const int e = mem.data_elements - 1;
+  if (e >= 0 && e < 4) {
+    switch (mem.data_type) {
+      case TYPE_UCHAR:
+        format = f_uchar[e];
+        break;
+      case TYPE_UINT16:
+        format = f_uint16[e];
+        break;
+      case TYPE_UINT:
+        format = f_uint[e];
+        break;
+      case TYPE_INT:
+        format = f_int[e];
+        break;
+      case TYPE_FLOAT:
+        format = f_float[e];
+        break;
+      case TYPE_HALF:
+        format = f_half[e];
+        break;
+      default:
+        break;
+    }
+  }
+  if (format == WMTPixelFormatInvalid) {
+    set_error("Unsupported image format");
+    return;
+  }
+
+  WMTTextureInfo ti = {};
+  ti.pixel_format = format;
+  ti.width = (uint32_t)mem.data_width;
+  ti.height = (uint32_t)mem.data_height;
+  ti.depth = 1;
+  ti.array_length = 1;
+  ti.type = WMTTextureType2D;
+  ti.mipmap_level_count = 1;
+  ti.sample_count = 1;
+  ti.usage = WMTTextureUsageShaderRead;
+  ti.options = WMTResourceStorageModeShared;
+
+  LOG_DEBUG << "Texture 2D allocate: " << mem.log_name() << ", "
+            << string_human_readable_number(size) << " bytes.";
+
+  obj_handle_t texture = MTLDevice_newTexture(mtlDevice, &ti);
+  if (!texture) {
+    set_error("System is out of GPU memory");
+    return;
+  }
+
+  const size_t src_pitch = mem.data_width * datatype_size(mem.data_type) * mem.data_elements;
+  WMTOrigin origin = {0, 0, 0};
+  WMTSize extent = {mem.data_width, mem.data_height, 1};
+  WMTMemoryPointer data;
+  data.ptr = mem.host_pointer;
+  MTLTexture_replaceRegion(texture, origin, extent, 0, 0, data, src_pitch, 0);
+
+  mem.device_pointer = (device_ptr)texture;
+  mem.device_size = size;
+  metal_mem_alloc(texture, size);
+
+  std::lock_guard<std::recursive_mutex> lock(metal_mem_map_mutex);
+  texture_map[&mem] = {texture, size};
+
+  const uint image_info_id = mem.image_info_id;
+  image_res_grow(image_info_id);
+
+  ImageRes &res = image_res[image_info_id];
+  res = ImageRes();
+  res.handle = texture;
+  res.gpu_id = ti.gpu_resource_id;
+  image_info[image_info_id] = mem.info;
+  image_info[image_info_id].data = uint64_t(image_info_id) | (sampler_index << 32);
+
+  if (stats.mem_used > recommended_working_set()) {
+    set_error("System is out of GPU memory");
+  }
+}
+
+void MetalDevice::image_copy_to(device_image &mem)
+{
+  if (mem.is_resident(this) && mem.data_height > 0) {
+    obj_handle_t texture = 0;
+    {
+      std::lock_guard<std::recursive_mutex> lock(metal_mem_map_mutex);
+      auto it = texture_map.find(&mem);
+      if (it == texture_map.end()) {
+        return;
+      }
+      texture = it->second.handle;
+    }
+    const size_t src_pitch = mem.data_width * datatype_size(mem.data_type) * mem.data_elements;
+    WMTOrigin origin = {0, 0, 0};
+    WMTSize extent = {mem.data_width, mem.data_height, 1};
+    WMTMemoryPointer data;
+    data.ptr = mem.host_pointer;
+    MTLTexture_replaceRegion(texture, origin, extent, 0, 0, data, src_pitch, 0);
+  }
 }
 
 void MetalDevice::image_free(device_image &mem)
 {
-  if (mem.device_pointer) {
-    generic_free(mem);
+  const uint image_info_id = mem.image_info_id;
+  if (mem.data_height == 0) {
+    if (mem.device_pointer) {
+      generic_free(mem);
+    }
+  }
+  else {
+    std::lock_guard<std::recursive_mutex> lock(metal_mem_map_mutex);
+    auto it = texture_map.find(&mem);
+    if (it != texture_map.end()) {
+      metal_mem_free(it->second.handle, it->second.size);
+      texture_map.erase(it);
+      mem.device_pointer = 0;
+      mem.device_size = 0;
+    }
+  }
+  if (image_info_id < image_res.size()) {
+    image_res[image_info_id] = ImageRes();
   }
 }
 
 void MetalDevice::load_image_info()
 {
+  /* Ensure image_info is allocated before populating. */
   image_info.copy_to_device();
-  if (image_bindings.contents) {
-    memset(image_bindings.contents, 0, image_bindings.size);
+
+  uint64_t *bindings = (uint64_t *)image_bindings.contents;
+  if (!bindings) {
+    return;
+  }
+  memset(bindings, 0, image_bindings.size);
+  const size_t count = min(size_t(image_info.size()), image_res.size());
+  for (size_t id = 0; id < count; ++id) {
+    const ImageRes &res = image_res[id];
+    if (!res.handle) {
+      continue;
+    }
+    if (res.is_buffer) {
+      /* The GPU address of a 1D buffer image goes into the image info itself. */
+      image_info[id].data = res.gpu_address;
+    }
+    else {
+      bindings[id] = res.gpu_id;
+    }
   }
 }
 

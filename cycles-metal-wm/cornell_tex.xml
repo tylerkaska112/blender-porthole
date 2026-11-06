@@ -1,0 +1,24 @@
+<cycles>
+  <background>
+    <background name="bg" color="0.35 0.45 0.65" strength="0.6" />
+    <connect from="bg background" to="output surface" />
+  </background>
+  <shader name="red"><diffuse_bsdf name="d" color="0.75 0.15 0.12" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="white"><diffuse_bsdf name="d" color="0.8 0.8 0.8" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="floor"><image_texture name="t" filename="tex_checker.png" /><diffuse_bsdf name="d" /><connect from="t color" to="d color" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="wall"><image_texture name="t" filename="tex_grad16.png" /><diffuse_bsdf name="d" /><connect from="t color" to="d color" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="green"><diffuse_bsdf name="d" color="0.15 0.6 0.2" /><connect from="d bsdf" to="output surface" /></shader>
+  <shader name="lamp"><emission name="e" color="1 0.95 0.85" strength="40" /><connect from="e emission" to="output surface" /></shader>
+  <transform translate="0 0 7" rotate="180 0 1 0"><camera type="perspective" fov="0.9" /></transform>
+  <!-- floor -->
+  <state shader="floor"><mesh P="-3 -2 -3  3 -2 -3  3 -2 3  -3 -2 3" nverts="4" verts="0 1 2 3" UV="0 0  1 0  1 1  0 1" /></state>
+  <!-- back wall -->
+  <state shader="wall"><mesh P="-3 -2 -3  3 -2 -3  3 3 -3  -3 3 -3" nverts="4" verts="0 1 2 3" UV="0 0  1 0  1 1  0 1" /></state>
+  <!-- left wall red, right wall green -->
+  <state shader="red"><mesh P="-3 -2 -3  -3 -2 3  -3 3 3  -3 3 -3" nverts="4" verts="0 1 2 3" /></state>
+  <state shader="green"><mesh P="3 -2 -3  3 3 -3  3 3 3  3 -2 3" nverts="4" verts="0 1 2 3" /></state>
+  <!-- a box and a lamp -->
+  <state shader="white"><mesh P="-1.5 -2 -1  0 -2 -1  0 -2 1  -1.5 -2 1  -1.5 0 -1  0 0 -1  0 0 1  -1.5 0 1"
+      nverts="4 4 4 4 4 4" verts="0 1 2 3  4 7 6 5  0 4 5 1  1 5 6 2  2 6 7 3  3 7 4 0" /></state>
+  <state shader="lamp"><mesh P="-1 2.9 -1  1 2.9 -1  1 2.9 1  -1 2.9 1" nverts="4" verts="3 2 1 0" /></state>
+</cycles>
