@@ -67,6 +67,9 @@ class MetalDeviceQueue : public DeviceQueue {
   uint64_t n_enqueue_ = 0;
   uint64_t n_sync_ = 0;
   double last_report_ = 0.0;
+  double report_started_ = 0.0;
+  double encode_seconds_ = 0.0;
+  double wait_seconds_ = 0.0;
   std::map<string, int> readback_counts_;
   void log_state_summary();
   string describe_address(uint64_t address);

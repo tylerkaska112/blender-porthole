@@ -1,0 +1,53 @@
+diff --git a/intern/cycles/blender/addon/__init__.py b/intern/cycles/blender/addon/__init__.py
+index 42a1e2ef..1ad00803 100644
+--- a/intern/cycles/blender/addon/__init__.py
++++ b/intern/cycles/blender/addon/__init__.py
+@@ -162,6 +162,29 @@ def register():
+ 
+     cli_commands.append(bpy.utils.register_cli_command("maketx", maketx_command))
+ 
++    # Porthole: with the Metal device present (only in Porthole's Windows build), switch it on at every start, whatever the saved
++    # preferences say, and create the device now, so the first render does not wait for it.
++    bpy.app.timers.register(_porthole_enable_metal, first_interval=1.0, persistent=True)
++
++
++def _porthole_enable_metal():
++    import sys
++    if sys.platform != 'win32':
++        return None
++    try:
++        import _cycles
++        if not _cycles.get_device_types()[3]:
++            return None
++        prefs = bpy.context.preferences.addons[__package__].preferences
++        if prefs.compute_device_type != 'METAL':
++            prefs.compute_device_type = 'METAL'
++        for device in prefs.get_devices_for_type('METAL'):
++            if device.type == 'METAL':
++                device.use = True
++    except Exception as ex:
++        print("Cycles: could not switch Metal on:", ex)
++    return None
++
+ 
+ def unregister():
+     from bpy.utils import unregister_class
+diff --git a/intern/cycles/blender/addon/properties.py b/intern/cycles/blender/addon/properties.py
+index 02aef651..415e7237 100644
+--- a/intern/cycles/blender/addon/properties.py
++++ b/intern/cycles/blender/addon/properties.py
+@@ -1633,6 +1633,14 @@ class CyclesPreferences(bpy.types.AddonPreferences):
+         # (drivers are tightly integrated with macOS so pose no stability risk)
+         if (platform.system() == 'Darwin') and (platform.machine() == 'arm64'):
+             return 5
++        # Porthole (Windows build running on an iPhone/iPad through Wine): the Metal device is there, use it.
++        if platform.system() == 'Windows':
++            try:
++                import _cycles
++                if _cycles.get_device_types()[3]:
++                    return 5
++            except Exception:
++                pass
+         return 0
+ 
+     def get_device_types(self, context):

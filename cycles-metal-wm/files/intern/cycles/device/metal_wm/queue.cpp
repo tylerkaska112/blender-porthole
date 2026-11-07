@@ -35,8 +35,9 @@ MetalDeviceQueue::~MetalDeviceQueue()
 int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
 {
 #  ifdef _WIN32
-  /* Under Porthole (a phone): 524288 paths keep the viewport and a final render inside the memory limit. */
-  size_t state_count = 524288;
+  /* Under Porthole (a phone): 1048576 paths (365 MB of state) cover a whole viewport in one pass, which halves the round trips to the GPU
+   * that the host waits for, and still sit well inside the memory limit. */
+  size_t state_count = 1048576;
 #  else
   size_t state_count = 4194304;
 #  endif
@@ -204,10 +205,16 @@ void MetalDeviceQueue::report_activity(const char *kernel_name)
   if (now - last_report_ >= 3.0) {
     last_report_ = now;
     fprintf(stderr,
-            "[cycles-wm] queue: %llu kernel dispatches, %llu synchronizations so far, last kernel %s\n",
+            "[cycles-wm] queue: %llu kernel dispatches, %llu synchronizations so far, last kernel %s; since the last line: %.0f ms encoding, %.0f ms waiting for the GPU, %.1f s elapsed\n",
             (unsigned long long)n_enqueue_,
             (unsigned long long)n_sync_,
-            kernel_name);
+            kernel_name,
+            encode_seconds_ * 1000.0,
+            wait_seconds_ * 1000.0,
+            report_started_ > 0 ? now - report_started_ : 0.0);
+    encode_seconds_ = 0;
+    wait_seconds_ = 0;
+    report_started_ = now;
   }
 }
 
@@ -531,6 +538,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     return false;
   }
 
+  const double enqueue_started = time_dt();
   debug_enqueue_begin(kernel, work_size);
   n_enqueue_++;
   last_kernel_ = kernel;
@@ -722,6 +730,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
   metal_device_->prepare_residency();
 
   debug_enqueue_end();
+  encode_seconds_ += time_dt() - enqueue_started;
 
   return !(metal_device_->have_error());
 }
@@ -737,8 +746,10 @@ bool MetalDeviceQueue::synchronize()
   }
 
   if (mtlCommandBuffer_) {
+    const double wait_started = time_dt();
     MTLCommandBuffer_commit(mtlCommandBuffer_);
     MTLCommandBuffer_waitUntilCompleted(mtlCommandBuffer_);
+    wait_seconds_ += time_dt() - wait_started;
 
     const WMTCommandBufferStatus status = MTLCommandBuffer_status(mtlCommandBuffer_);
     mtlCommandBuffer_ = 0;
