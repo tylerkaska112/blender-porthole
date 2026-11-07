@@ -419,6 +419,110 @@ void MetalDeviceQueue::probe_counter_write()
   wm::release(lib);
 }
 
+/* Compares what the host wrote into the launch parameters with what the GPU reads back from them (same sizes, same offsets,
+ * same contents?). A Windows build lays structs out by its own rules; the Metal compiler uses Apple's. */
+void MetalDeviceQueue::layout_check()
+{
+  layout_done_ = true;
+  MetalDevice *d = metal_device_;
+  if (!d->mtlLibrary || !d->launch_params) {
+    return;
+  }
+  obj_handle_t fn = MTLLibrary_newFunction(d->mtlLibrary, "wm_layout");
+  if (!fn) {
+    fprintf(stderr, "[cycles-wm] layout: the library has no wm_layout function\n");
+    return;
+  }
+  WMTComputePipelineInfoEx info = {};
+  info.compute_function = fn;
+  info.max_total_threads_per_threadgroup = 1;
+  info.flags = 0;
+  info.immutable_buffers = 0;
+  obj_handle_t error = 0;
+  obj_handle_t pso = MTLDevice_newComputePipelineStateEx(d->mtlDevice, &info, &error);
+  const string text = wm::error_text(error);
+  if (!pso) {
+    fprintf(stderr, "[cycles-wm] layout: pipeline did not build: %s\n", text.c_str());
+    wm::release(fn);
+    return;
+  }
+  wm::Buffer out = wm::new_buffer(d->mtlDevice, 4096);
+  d->metal_mem_alloc(out);
+  d->prepare_residency();
+  memset(out.contents, 0xEE, 4096);
+
+  obj_handle_t cb = MTLCommandQueue_commandBuffer(mtlCommandQueue_);
+  obj_handle_t enc = MTLCommandBuffer_computeCommandEncoder(cb, false);
+  wmtcmd_compute_setpso set_pso = {};
+  set_pso.type = WMTComputeCommandSetPSO;
+  set_pso.pso = pso;
+  set_pso.threadgroup_size = {1, 1, 1};
+  wmtcmd_compute_setbuffer b0 = {};
+  b0.type = WMTComputeCommandSetBuffer;
+  b0.buffer = out.handle;
+  b0.offset = 0;
+  b0.index = 0;
+  wmtcmd_compute_setbuffer b1 = {};
+  b1.type = WMTComputeCommandSetBuffer;
+  b1.buffer = d->launch_params_buffer.handle;
+  b1.offset = 0;
+  b1.index = 1;
+  wmtcmd_compute_dispatch dispatch = {};
+  dispatch.type = WMTComputeCommandDispatchThreads;
+  dispatch.size = {1, 1, 1};
+  set_pso.next.ptr = &b0;
+  b0.next.ptr = &b1;
+  b1.next.ptr = &dispatch;
+  dispatch.next.ptr = nullptr;
+  MTLComputeCommandEncoder_encodeCommands(enc, (wmtcmd_base *)&set_pso);
+  MTLCommandEncoder_endEncoding(enc);
+  MTLCommandBuffer_commit(cb);
+  MTLCommandBuffer_waitUntilCompleted(cb);
+  const int status = int(MTLCommandBuffer_status(cb));
+
+  const uint32_t *g = (const uint32_t *)out.contents;
+  const uint32_t host_sizes[5] = {uint32_t(sizeof(KernelParamsMetal)),
+                                  uint32_t(sizeof(KernelData)),
+                                  uint32_t(sizeof(IntegratorStateGPU)),
+                                  uint32_t(offsetof(KernelParamsMetal, data)),
+                                  uint32_t(offsetof(KernelParamsMetal, integrator_state))};
+  const char *labels[5] = {"sizeof(KernelParamsMetal)", "sizeof(KernelData)", "sizeof(IntegratorStateGPU)", "offsetof(data)", "offsetof(integrator_state)"};
+  int bad = 0;
+  for (int i = 0; i < 5; i++) {
+    fprintf(stderr, "[cycles-wm] layout: %s host %u, GPU %u %s\n", labels[i], host_sizes[i], g[i], host_sizes[i] == g[i] ? "ok" : "<-- DIFFERENT");
+    bad += host_sizes[i] != g[i];
+  }
+  const uint32_t *dp = (const uint32_t *)&d->launch_params->data;
+  const uint32_t *sp = (const uint32_t *)&d->launch_params->integrator_state;
+  int first_bad_data = -1, first_bad_state = -1;
+  for (uint32_t c = 0; c < 16; c++) {
+    uint32_t h = 0, h2 = 0;
+    for (uint32_t i = c * 256; i < (c + 1) * 256 && i < sizeof(KernelData) / 4; i++) {
+      h = h * 31u + dp[i];
+    }
+    for (uint32_t i = c * 64; i < (c + 1) * 64 && i < sizeof(IntegratorStateGPU) / 4; i++) {
+      h2 = h2 * 31u + sp[i];
+    }
+    if (h != g[8 + c] && first_bad_data < 0) {
+      first_bad_data = int(c);
+    }
+    if (h2 != g[24 + c] && first_bad_state < 0) {
+      first_bad_state = int(c);
+    }
+  }
+  fprintf(stderr,
+          "[cycles-wm] layout: command buffer status %d; KernelData contents %s (first differing 1 KB block %d); IntegratorStateGPU contents %s (first differing 256 B block %d) -> %s\n",
+          status,
+          first_bad_data < 0 ? "identical" : "DIFFERENT",
+          first_bad_data,
+          first_bad_state < 0 ? "identical" : "DIFFERENT",
+          first_bad_state,
+          (bad == 0 && first_bad_data < 0 && first_bad_state < 0) ? "THE GPU SEES WHAT THE HOST WROTE" : "LAYOUT MISMATCH");
+  d->metal_mem_free(out.handle, out.size);
+  wm::release(pso);
+  wm::release(fn);
+}
+
 bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
                                const int work_size,
                                const DeviceKernelArguments &args)
@@ -430,6 +534,9 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
   debug_enqueue_begin(kernel, work_size);
   n_enqueue_++;
   last_kernel_ = kernel;
+  if (!layout_done_ && kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA) {
+    layout_check();
+  }
   report_activity(device_kernel_as_string(kernel));
 
   const MetalPipeline *pipeline = metal_device_->get_pipeline(kernel);
@@ -535,6 +642,19 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
       fprintf(stderr, "[cycles-wm]   arg word %zu = 0x%llx %s\n", off / 8, (unsigned long long)w, describe_address(w).c_str());
     }
     if (kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA) {
+      {
+        std::lock_guard<std::recursive_mutex> lock(metal_device_->metal_mem_map_mutex);
+        for (auto &it : metal_device_->metal_mem_map) {
+          if (it.second->mem && it.second->hostPtr && it.second->mem->log_name() == "work_tiles") {
+            const int *t = (const int *)it.second->hostPtr;
+            string text;
+            for (size_t i = 0; i < std::min<size_t>(it.second->size / 4, 11); i++) {
+              text += string_printf(" %d", t[i]);
+            }
+            fprintf(stderr, "[cycles-wm]   work_tiles ints:%s\n", text.c_str());
+          }
+        }
+      }
       const uint64_t *lp = (const uint64_t *)&metal_device_->launch_params->integrator_state;
       const size_t n = offsetof(IntegratorStateGPU, sort_partition_divisor) / 8;
       for (size_t i = 0; i < n; i++) {

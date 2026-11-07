@@ -71,6 +71,8 @@ class MetalDeviceQueue : public DeviceQueue {
   void log_state_summary();
   string describe_address(uint64_t address);
   void probe_counter_write();
+  void layout_check();
+  bool layout_done_ = false;
   bool probe_done_ = false;
   DeviceKernel last_kernel_ = DEVICE_KERNEL_NUM;
   int n_state_logs_ = 0;

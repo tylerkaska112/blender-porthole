@@ -368,6 +368,23 @@ bool MetalDevice::compile_library()
 {
   string text = "\n#include \"kernel/device/metal/kernel.metal\"\n";
   text = path_source_replace_includes(text, path_get("source"));
+  /* A kernel that reports how the GPU sees the launch parameters (sizes, offsets, a hash of every 256 words), to be
+   * compared with what the host wrote (MetalDeviceQueue::layout_check). */
+  text += "\nkernel void wm_layout(device uint *out [[buffer(0)]], constant KernelParamsMetal &launch_params_metal [[buffer(1)]], uint tid [[thread_position_in_grid]])\n"
+          "{\n"
+          "  if (tid != 0) { return; }\n"
+          "  constant uint *dp = (constant uint *)&launch_params_metal.data;\n"
+          "  constant uint *sp = (constant uint *)&launch_params_metal.integrator_state;\n"
+          "  out[0] = uint(sizeof(KernelParamsMetal)); out[1] = uint(sizeof(KernelData)); out[2] = uint(sizeof(IntegratorStateGPU));\n"
+          "  out[3] = uint((constant char *)&launch_params_metal.data - (constant char *)&launch_params_metal);\n"
+          "  out[4] = uint((constant char *)&launch_params_metal.integrator_state - (constant char *)&launch_params_metal);\n"
+          "  for (uint c = 0; c < 16; c++) {\n"
+          "    uint h = 0; uint h2 = 0;\n"
+          "    for (uint i = c * 256; i < (c + 1) * 256 && i < uint(sizeof(KernelData) / 4); i++) { h = h * 31u + dp[i]; }\n"
+          "    for (uint i = c * 64; i < (c + 1) * 64 && i < uint(sizeof(IntegratorStateGPU) / 4); i++) { h2 = h2 * 31u + sp[i]; }\n"
+          "    out[8 + c] = h; out[24 + c] = h2;\n"
+          "  }\n"
+          "}\n";
   source = preprocess_source() + text;
 
   const string key = preprocess_source();
