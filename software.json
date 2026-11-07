@@ -15,36 +15,6 @@
       "desktop": true,
       "symbol": "cube.transparent.fill",
       "notes": "A kernel pack that does not fit the device is dropped and the kernels compile as before; packs are per system version."
-    },
-    {
-      "id": "blender-kernels-applegpu_g16g",
-      "title": "Blender GPU kernels for this device",
-      "summary": "Render kernels built ahead of time for this device's GPU. Blender then starts rendering without compiling them on the phone, and scenes with transparent shadows render with the right shadows. Download it once; it is used by Blender automatically.",
-      "version": "build 16",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-applegpu_g16g-b16.zip",
-      "sha256": "145923d0f4791a37b2b77668e06b2d48ced1f01e985a49d5c1da4d9c278e0fce",
-      "bytes": 37760379,
-      "exe": "masks.txt",
-      "folder": "Blender Kernels",
-      "symbol": "bolt.fill",
-      "arch": "applegpu_g16g",
-      "library": false,
-      "notes": "Kernels for feature sets 0x80000803, 0x80080803 and a generic one, for the M4 GPU."
-    },
-    {
-      "id": "blender-kernels-applegpu_g16p",
-      "title": "Blender GPU kernels for this device",
-      "summary": "Render kernels built ahead of time for this device's GPU. Blender then starts rendering without compiling them on the phone, and scenes with transparent shadows render with the right shadows. Download it once; it is used by Blender automatically.",
-      "version": "build 16",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-applegpu_g16p-b16.zip",
-      "sha256": "07a430c7e489dbf6db0d4723a623e8e45df7729ab556c44775b6d95ba9153ae9",
-      "bytes": 37760614,
-      "exe": "masks.txt",
-      "folder": "Blender Kernels",
-      "symbol": "bolt.fill",
-      "arch": "applegpu_g16p",
-      "library": false,
-      "notes": "Kernels for feature sets 0x80000803, 0x80080803 and a generic one, for the A17 Pro GPU."
     }
   ]
 }
