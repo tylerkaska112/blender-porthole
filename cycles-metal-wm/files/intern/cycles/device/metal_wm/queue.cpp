@@ -56,6 +56,7 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
     }
   }
 
+  metal_device_->wait_for_kernels(240.0);
   const size_t max_recommended_working_set = metal_device_->recommended_working_set();
 
   /* Allow for a percentage of the recommended working set to be used (default 90%). */

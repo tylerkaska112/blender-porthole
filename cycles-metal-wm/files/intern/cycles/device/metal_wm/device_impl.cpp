@@ -5,6 +5,16 @@
 
 #ifdef WITH_METAL
 
+#  ifdef _WIN32
+#    ifndef NOMINMAX
+#      define NOMINMAX
+#    endif
+#    ifndef WIN32_LEAN_AND_MEAN
+#      define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <windows.h>
+#  endif
+
 #  include <algorithm>
 #  include <mutex>
 #  include <vector>
@@ -549,9 +559,19 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
     if (p.pipeline || (text_error.find("INTERRUPTED") == string::npos && text_error.find("nterrupted") == string::npos)) {
       break;
     }
-    fprintf(stderr, "[cycles-wm] building %s was interrupted by the system (low memory?); trying again in %.1f s (attempt %d)\n",
-            device_kernel_as_string(kernel), 1.5 * (attempt + 1), attempt + 2);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500 * (attempt + 1)));
+    size_t left_mb = 0;
+#  ifdef _WIN32
+    {
+      MEMORYSTATUSEX status = {};
+      status.dwLength = sizeof(status);
+      if (GlobalMemoryStatusEx(&status)) {
+        left_mb = size_t(status.ullAvailPhys >> 20);
+      }
+    }
+#  endif
+    fprintf(stderr, "[cycles-wm] building %s was interrupted by the system (memory left %zu MB); trying again in %d s (attempt %d)\n",
+            device_kernel_as_string(kernel), left_mb, 3 * (attempt + 1), attempt + 2);
+    std::this_thread::sleep_for(std::chrono::seconds(3 * (attempt + 1)));
   }
   if (!p.pipeline) {
     error_text = string_printf(
@@ -619,6 +639,20 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
 
 /* ---- building the pipelines up front ---- */
 
+/* The path states (hundreds of MB) are allocated only after the kernels are built: the compiler service needs the room while it works. */
+void MetalDevice::wait_for_kernels(const double max_seconds)
+{
+  const double started = time_dt();
+  bool waited = false;
+  while (precompile_active.load() > 0 && time_dt() - started < max_seconds) {
+    waited = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (waited) {
+    fprintf(stderr, "[cycles-wm] waited %.1f s for the kernels before allocating the path states\n", time_dt() - started);
+  }
+}
+
 void MetalDevice::join_precompile()
 {
   for (std::thread &t : precompile_threads) {
@@ -668,6 +702,20 @@ void MetalDevice::start_precompile()
   precompile_done = 0;
   precompile_total = int(sizeof(core) / sizeof(core[0]));
   int workers = 3;
+#  ifdef _WIN32
+  /* A phone next to a big scene: the system stops the compiler service when memory runs short, and every compile that runs
+   * at the same time makes it bigger. With less than 3 GB left, one kernel is compiled at a time. */
+  {
+    MEMORYSTATUSEX status = {};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+      fprintf(stderr, "[cycles-wm] kernel features 0x%x, library source %zu bytes, memory left %zu MB\n", kernel_features, source.size(), size_t(status.ullAvailPhys >> 20));
+      if (status.ullAvailPhys < (3000ull << 20)) {
+        workers = 1;
+      }
+    }
+  }
+#  endif
   if (const char *str = getenv("CYCLES_METAL_COMPILE_THREADS")) {
     workers = std::max(0, std::min(8, atoi(str)));
   }

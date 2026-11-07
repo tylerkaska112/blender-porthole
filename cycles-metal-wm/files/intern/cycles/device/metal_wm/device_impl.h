@@ -70,6 +70,7 @@ class MetalDevice : public Device {
   int precompile_total = 0;
   void start_precompile();
   void join_precompile();
+  void wait_for_kernels(double max_seconds);
   bool build_pipeline(DeviceKernel kernel, MetalPipeline &out, string &error_text);
 
   struct MetalMem {
