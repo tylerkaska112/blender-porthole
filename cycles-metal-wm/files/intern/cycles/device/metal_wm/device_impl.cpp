@@ -205,11 +205,24 @@ string MetalDevice::preprocess_source()
 {
   string global_defines;
 
-  if (DebugFlags().metal.adaptive_compile) {
+  /* Kernels specialized for what the scene uses compile much faster than the generic ones (the A17 needed
+   * 236 s for the generic set). Under Porthole this is the default; CYCLES_METAL_ADAPTIVE_COMPILE=0 turns it off. */
+  bool adaptive_compile = DebugFlags().metal.adaptive_compile;
+#  ifdef _WIN32
+  adaptive_compile = true;
+#  endif
+  if (const char *env = getenv("CYCLES_METAL_ADAPTIVE_COMPILE")) {
+    adaptive_compile = (atoi(env) != 0) || (env[0] != '0');
+  }
+  if (adaptive_compile) {
     global_defines += "#define __KERNEL_FEATURES__ " + to_string(kernel_features) + "\n";
   }
   if (DebugFlags().metal.use_local_atomic_sort) {
     global_defines += "#define __KERNEL_LOCAL_ATOMIC_SORT__\n";
+  }
+  /* Test knob: a different value makes a source Metal has not compiled before (cold compile timings). */
+  if (const char *bust = getenv("CYCLES_WM_CACHE_BUST")) {
+    global_defines += string("#define __WM_CACHE_BUST__ ") + bust + "\n";
   }
   global_defines += "#define __KERNEL_METAL_APPLE__\n";
   global_defines += "#define __METAL_GLOBAL_BUILTINS__\n";
