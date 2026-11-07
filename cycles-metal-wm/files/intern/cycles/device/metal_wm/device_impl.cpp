@@ -531,33 +531,37 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
     return false;
   }
   /* The pack that has every feature the scene needs, and the fewest others (a kernel with more features than the scene uses is what Cycles' own generic kernels are). */
-  uint pack = 0;
-  bool found = false;
-  {
-    vector<uint8_t> list;
-    if (read_whole_file(dir + "/masks.txt", list)) {
-      const string text(list.begin(), list.end());
-      size_t pos = 0;
-      while (pos < text.size()) {
-        size_t end = text.find('\n', pos);
-        if (end == string::npos) {
-          end = text.size();
-        }
-        const uint mask = uint(strtoul(text.substr(pos, end - pos).c_str(), nullptr, 16));
-        pos = end + 1;
-        if (mask && (mask & features) == features) {
-          if (!found || __builtin_popcount(mask) < __builtin_popcount(pack)) {
-            pack = mask;
-            found = true;
-          }
+  vector<uint8_t> masks_text;
+  const bool have_masks = read_whole_file(dir + "/masks.txt", masks_text);
+  auto choose = [&](const uint want, uint &pack) -> bool {
+    bool found = false;
+    if (!have_masks) {
+      return false;
+    }
+    const string text(masks_text.begin(), masks_text.end());
+    size_t pos = 0;
+    while (pos < text.size()) {
+      size_t end = text.find('\n', pos);
+      if (end == string::npos) {
+        end = text.size();
+      }
+      const uint mask = uint(strtoul(text.substr(pos, end - pos).c_str(), nullptr, 16));
+      pos = end + 1;
+      if (mask && (mask & want) == want) {
+        if (!found || __builtin_popcount(mask) < __builtin_popcount(pack)) {
+          pack = mask;
+          found = true;
         }
       }
     }
-  }
-  if (!found) {
+    return found;
+  };
+  uint want = features;
+  uint pack = 0;
+  if (!choose(want, pack)) {
     return false;
   }
-  const string base = string_printf("%s/%08x", dir.c_str(), pack);
+  string base = string_printf("%s/%08x", dir.c_str(), pack);
   vector<uint8_t> air, archive;
   if (!read_whole_file(base + ".metallib", air)) {
     return false;
@@ -565,11 +569,33 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
   const string arch = gpu_architecture();
   const string os = ios_version();
   prebuilt_library_only = false;
-  const bool have_archive = !os.empty() && read_whole_file(base + "-" + arch + "-" + os + ".archive", archive);
-  /* A pack marked "library-only-ok" (the universal pack) is used without GPU binaries: its device-independent shader code is loaded and the device only builds the GPU code from it. */
+  bool have_archive = !os.empty() && read_whole_file(base + "-" + arch + "-" + os + ".archive", archive);
+  /* A pack marked "library-only-ok" is used without GPU binaries: its device-independent shader code is loaded and the device only builds the GPU code from it. */
   vector<uint8_t> marker;
   const bool library_only_ok = read_whole_file(dir + "/library-only-ok", marker);
-  if (!have_archive && !library_only_ok) {
+  if (!have_archive && library_only_ok) {
+    /* The system's compiler cannot build the kernels with transparent shadows (it is stopped part-way, and the render fails): without GPU binaries for this device they are left out,
+     * as they are when there is no pack at all, and the quick part of the work still comes from the pack. */
+#  ifdef _WIN32
+    const char *keep = getenv("CYCLES_WM_KEEP_TRANSPARENT");
+    if ((want & KERNEL_FEATURE_TRANSPARENT) && !(keep && atoi(keep) != 0)) {
+      uint lesser = 0;
+      want &= ~uint(KERNEL_FEATURE_TRANSPARENT);
+      if (!choose(want, lesser)) {
+        return false;
+      }
+      pack = lesser;
+      base = string_printf("%s/%08x", dir.c_str(), pack);
+      air.clear();
+      if (!read_whole_file(base + ".metallib", air)) {
+        return false;
+      }
+      drop_transparent = true;
+      fprintf(stderr, "[cycles-wm] leaving out transparent shadows (no GPU binaries in the pack for this device, and the system's compiler cannot build those kernels); shadows of transparent surfaces will be solid\n");
+    }
+#  endif
+  }
+  else if (!have_archive) {
     fprintf(stderr, "[cycles-wm] a kernel pack for features 0x%x exists, but not for this GPU and system (%s, iOS %s)\n", pack, arch.c_str(), os.c_str());
     return false;
   }
@@ -642,9 +668,12 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
   if (drop_denoising) {
     kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
   }
+  if (drop_transparent) {
+    kernel_features &= ~uint(KERNEL_FEATURE_TRANSPARENT);
+  }
   /* Kernels built ahead of time for exactly these features: used as they are, with every feature the scene needs. */
   {
-    const string key = string_printf("prebuilt:%08x", kernel_features);
+    string key = string_printf("prebuilt:%08x", kernel_features);
     if (mtlLibrary && key == library_features_key) {
       return true;
     }
@@ -658,6 +687,10 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
       wm::release(mtlLibrary);
     }
     if (from_pack) {
+      if (drop_transparent) {
+        kernel_features &= ~uint(KERNEL_FEATURE_TRANSPARENT);
+        key = string_printf("prebuilt:%08x", kernel_features);
+      }
       library_features_key = key;
       for (MetalPipeline &p : pipelines) {
         wm::release(p.pipeline);
@@ -934,6 +967,7 @@ void MetalDevice::recover_after_failure(const DeviceKernel kernel)
       {"denoising + light tree + transparent", uint(KERNEL_FEATURE_DENOISING | KERNEL_FEATURE_LIGHT_TREE | KERNEL_FEATURE_TRANSPARENT)},
   };
   bool denoising_fixes_it = false;
+  bool transparent_fixes_it = false;
   for (const Suspect &s : suspects) {
     if (!(features & s.bits)) {
       continue;
@@ -945,16 +979,30 @@ void MetalDevice::recover_after_failure(const DeviceKernel kernel)
     if (ok && s.bits == uint(KERNEL_FEATURE_DENOISING)) {
       denoising_fixes_it = true;
     }
+    if (ok && s.bits == uint(KERNEL_FEATURE_TRANSPARENT)) {
+      transparent_fixes_it = true;
+    }
   }
 
-  if (!denoising_fixes_it) {
+  if (!denoising_fixes_it && !transparent_fixes_it) {
     set_error(precompile_error.empty() ? "A render kernel could not be built." : precompile_error);
     return;
   }
 
-  fprintf(stderr, "[cycles-wm] carrying on without the denoising data kernels (a denoiser then works without its guide passes)\n");
-  drop_denoising = true;
-  kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
+  if (denoising_fixes_it) {
+    fprintf(stderr, "[cycles-wm] carrying on without the denoising data kernels (a denoiser then works without its guide passes)\n");
+    drop_denoising = true;
+    kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
+  }
+  else {
+    /* The compiler is stopped by the kernels with transparent shadows: carry on without them (the shadows of transparent surfaces then come out solid). */
+    fprintf(stderr, "[cycles-wm] carrying on without transparent shadows (the system's compiler cannot build those kernels); shadows of transparent surfaces will be solid\n");
+    drop_transparent = true;
+    kernel_features &= ~uint(KERNEL_FEATURE_TRANSPARENT);
+  }
+  /* The kernels are compiled from source from here on: a pack that led to the failure is not used again. */
+  prebuilt_disabled = true;
+  prebuilt_active = false;
   library_features_key = preprocess_source();
   string text = "\n#include \"kernel/device/metal/kernel.metal\"\n";
   text = path_source_replace_includes(text, path_get("source"));

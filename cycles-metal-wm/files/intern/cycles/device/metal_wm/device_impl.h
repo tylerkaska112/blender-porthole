@@ -86,6 +86,7 @@ class MetalDevice : public Device {
   bool probe_prebuilt();
   void log_memory_breakdown(const char *when);
   bool drop_denoising = false;
+  bool drop_transparent = false;   /* transparent shadows are left out: the system's compiler cannot build those kernels */
   string precompile_error;
   std::atomic<int> precompile_failed_kernel{-1};
   bool try_variant(uint features, DeviceKernel kernel, string &why);
