@@ -52,15 +52,15 @@
       "id": "blender-kernels-universal",
       "title": "Blender GPU kernels (universal, test)",
       "summary": "A test: shader code built ahead of time that works on any GPU and system version. The phone only builds the GPU code from it. It replaces the device-specific kernels above; download those again to go back.",
-      "version": "build 18",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-universal-b18.zip",
+      "version": "build 19",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-universal-b19.zip",
       "sha256": "3bc1aa26288566035fba72fa29951faa70bf19c455fc628c9fc8c68ac72bb1c6",
       "bytes": 13836731,
       "exe": "masks.txt",
       "folder": "Blender Kernels",
       "symbol": "bolt.horizontal.fill",
       "library": false,
-      "notes": "Test pack: shader code only; the device builds the GPU code."
+      "notes": "Any device: the shader code only, GPU code built on the device, without transparent shadows."
     }
   ]
 }
