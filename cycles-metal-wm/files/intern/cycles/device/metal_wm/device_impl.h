@@ -72,6 +72,7 @@ class MetalDevice : public Device {
   string preprocess_source_for(uint features);
   void join_precompile();
   void wait_for_kernels(double max_seconds);
+  void log_memory_breakdown(const char *when);
   bool drop_denoising = false;
   string precompile_error;
   std::atomic<int> precompile_failed_kernel{-1};

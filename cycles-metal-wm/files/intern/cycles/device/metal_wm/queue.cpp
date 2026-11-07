@@ -57,6 +57,20 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
   }
 
   metal_device_->wait_for_kernels(240.0);
+#  ifdef _WIN32
+  /* No more path states than the frame has pixels (a viewport of 633k pixels does not need 1M), rounded up to a whole 4096. */
+  if (metal_device_->launch_params) {
+    const double pixels = double(metal_device_->launch_params->data.cam.width) * double(metal_device_->launch_params->data.cam.height);
+    if (pixels >= 1.0) {
+      const size_t want = std::max<size_t>(131072, (size_t(pixels) + 4095) / 4096 * 4096);
+      if (want < state_count) {
+        fprintf(stderr, "[cycles-wm] frame of %.0f pixels: path states %zu instead of %zu\n", pixels, want, state_count);
+        state_count = want;
+      }
+    }
+  }
+#  endif
+  metal_device_->log_memory_breakdown("before the path states");
   const size_t max_recommended_working_set = metal_device_->recommended_working_set();
 
   /* Allow for a percentage of the recommended working set to be used (default 90%). */
@@ -568,6 +582,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
   n_enqueue_++;
   last_kernel_ = kernel;
   if (!layout_done_ && kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA) {
+    metal_device_->log_memory_breakdown("render start");
     layout_check();
   }
   report_activity(device_kernel_as_string(kernel));

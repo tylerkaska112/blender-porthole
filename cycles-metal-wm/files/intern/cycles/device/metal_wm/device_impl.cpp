@@ -788,6 +788,47 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel, const 
 
 /* ---- building the pipelines up front ---- */
 
+/* Where the GPU memory goes: totals by kind, the biggest buffers, and the pixel copies the host still holds next to their textures. */
+void MetalDevice::log_memory_breakdown(const char *when)
+{
+  std::lock_guard<std::recursive_mutex> lock(metal_mem_map_mutex);
+  struct Item {
+    size_t bytes;
+    string name;
+  };
+  vector<Item> items;
+  size_t buffers = 0, textures = 0, texture_host_copies = 0, host_backed = 0;
+  for (auto &it : metal_mem_map) {
+    buffers += it.second->size;
+    items.push_back({size_t(it.second->size), it.second->mem ? it.second->mem->log_name() : string("?")});
+  }
+  for (auto &it : texture_map) {
+    textures += it.second.size;
+    device_memory *mem = it.first;
+    if (mem && mem->host_pointer) {
+      texture_host_copies += mem->memory_size();
+    }
+  }
+  (void)host_backed;
+  std::sort(items.begin(), items.end(), [](const Item &a, const Item &b) { return a.bytes > b.bytes; });
+  size_t left_mb = 0;
+#  ifdef _WIN32
+  {
+    MEMORYSTATUSEX status = {};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+      left_mb = size_t(status.ullAvailPhys >> 20);
+    }
+  }
+#  endif
+  fprintf(stderr, "[cycles-wm] memory (%s): %zu buffers %zu MB, %zu textures %zu MB, pixel copies the host still holds %zu MB, %zu MB left\n",
+          when, metal_mem_map.size(), buffers >> 20, texture_map.size(), textures >> 20, texture_host_copies >> 20,
+          left_mb);
+  for (size_t i = 0; i < items.size() && i < 12; i++) {
+    fprintf(stderr, "[cycles-wm]   %7.1f MB  %s\n", double(items[i].bytes) / 1048576.0, items[i].name.c_str());
+  }
+}
+
 /* The path states (hundreds of MB) are allocated only after the kernels are built: the compiler service needs the room while it works. */
 void MetalDevice::wait_for_kernels(const double max_seconds)
 {
