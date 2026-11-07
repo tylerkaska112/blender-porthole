@@ -31,6 +31,22 @@
       "os": "27.0",
       "library": false,
       "notes": "For the iPad Pro (M4) on iPadOS 27.0."
+    },
+    {
+      "id": "blender-kernels-applegpu_g16p-ios27.2",
+      "title": "Blender GPU kernels for this device",
+      "summary": "Render kernels built ahead of time for this device's GPU. Blender then starts rendering without compiling them on the phone, and scenes with transparent shadows render with the right shadows. Download it once; it is used by Blender automatically.",
+      "version": "build 17",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-applegpu_g16p-ios27.2-b17.zip",
+      "sha256": "3e252e5aa50a624220ca7b9259a3b6073c3c15d7a2d423a32ddad292cf051f69",
+      "bytes": 37653109,
+      "exe": "masks.txt",
+      "folder": "Blender Kernels",
+      "symbol": "bolt.fill",
+      "arch": "applegpu_g16p",
+      "os": "27.2",
+      "library": false,
+      "notes": "For the iPhone 15 Pro (A17 Pro) on iOS 27.2."
     }
   ]
 }
