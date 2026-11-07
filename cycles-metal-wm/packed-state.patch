@@ -1,0 +1,16 @@
+diff --git a/intern/cycles/kernel/types.h b/intern/cycles/kernel/types.h
+index de78d954..5259de29 100644
+--- a/intern/cycles/kernel/types.h
++++ b/intern/cycles/kernel/types.h
+@@ -623,8 +623,10 @@ struct Intersection {
+  * specify that certain fields should be packed together. This improves cache hit ratios in cases
+  * where fields are often accessed together (e.g. "ray" and "isect").
+  */
++/* Porthole: the Windows host of the winemetal Metal device must lay the state out like the Metal kernels do. */
+ #if (defined(__APPLE__) && TARGET_CPU_ARM64) || \
+-    (defined(__KERNEL_METAL_APPLE__) && defined(__KERNEL_METAL_TARGET_CPU_ARM64__))
++    (defined(__KERNEL_METAL_APPLE__) && defined(__KERNEL_METAL_TARGET_CPU_ARM64__)) || \
++    (defined(_WIN32) && defined(WITH_METAL))
+ #  define __INTEGRATOR_GPU_PACKED_STATE__
+ 
+ /* Generate packed layouts for structs declared with KERNEL_STRUCT_BEGIN_PACKED. For example the
