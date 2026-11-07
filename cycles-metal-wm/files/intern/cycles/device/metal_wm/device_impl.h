@@ -72,6 +72,14 @@ class MetalDevice : public Device {
   string preprocess_source_for(uint features);
   void join_precompile();
   void wait_for_kernels(double max_seconds);
+
+  /* Kernels built ahead of time with Apple's offline tools (see tools/spikes/cycles_metal/build_kernel_pack.sh): <dir>/<features>.metallib (the AIR, device independent)
+   * and <dir>/<features>-<gpu architecture>.archive (the GPU binaries). With both, no kernel is compiled on the device. */
+  string kernel_pack_dir();
+  string gpu_architecture();
+  bool load_prebuilt_kernels(uint features);
+  bool prebuilt_active = false;
+  string gpu_arch_name;
   void log_memory_breakdown(const char *when);
   bool drop_denoising = false;
   string precompile_error;

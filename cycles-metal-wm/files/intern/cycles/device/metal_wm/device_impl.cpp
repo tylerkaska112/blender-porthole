@@ -403,6 +403,14 @@ bool MetalDevice::compile_library()
           "  }\n"
           "}\n";
   source = preprocess_source() + text;
+  if (const char *dump = getenv("CYCLES_WM_DUMP_SOURCE")) {
+    /* For the kernel pack builder: the exact source this device would compile for these features. */
+    if (FILE *f = fopen(string_printf("%s/%08x.metal", dump, kernel_features).c_str(), "wb")) {
+      fwrite(source.data(), 1, source.size(), f);
+      fclose(f);
+    }
+  }
+  prebuilt_active = false;
 
   const string key = preprocess_source();
   if (mtlLibrary && key == library_features_key) {
@@ -433,6 +441,141 @@ bool MetalDevice::compile_library()
   return true;
 }
 
+static bool read_whole_file(const string &path, vector<uint8_t> &out)
+{
+  FILE *f = fopen(path.c_str(), "rb");
+  if (!f) {
+    return false;
+  }
+  fseek(f, 0, SEEK_END);
+  const long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  out.resize(size > 0 ? size_t(size) : 0);
+  const bool ok = size > 0 && fread(out.data(), 1, out.size(), f) == out.size();
+  fclose(f);
+  return ok;
+}
+
+string MetalDevice::kernel_pack_dir()
+{
+  if (const char *env = getenv("CYCLES_WM_KERNEL_DIR")) {
+    return env;
+  }
+#  ifdef _WIN32
+  /* Porthole's Software page installs the pack beside Blender (C:\Program Files\Blender Kernels); a `kernels` folder next to blender.exe works too. Both need Porthole 1.3.41 or
+   * later, whose winemetal has the binary archive call (it writes C:\\windows\\porthole-winemetal-slots). */
+  {
+    vector<uint8_t> marker;
+    if (!read_whole_file("C:\\windows\\porthole-winemetal-slots", marker) || atoi(string(marker.begin(), marker.end()).c_str()) < 171) {
+      return "";
+    }
+  }
+  char exe[1024] = {0};
+  if (GetModuleFileNameA(nullptr, exe, sizeof(exe) - 1)) {
+    string dir = exe;
+    const size_t cut = dir.find_last_of("\\/");
+    if (cut != string::npos) {
+      dir.resize(cut);
+    }
+    vector<uint8_t> probe;
+    if (read_whole_file(dir + "\\kernels\\masks.txt", probe)) {
+      return dir + "\\kernels";
+    }
+    const size_t parent = dir.find_last_of("\\/");
+    if (parent != string::npos) {
+      const string sibling = dir.substr(0, parent) + "\\Blender Kernels";
+      if (read_whole_file(sibling + "\\masks.txt", probe)) {
+        return sibling;
+      }
+    }
+  }
+#  endif
+  return "";
+}
+
+string MetalDevice::gpu_architecture()
+{
+  if (gpu_arch_name.empty()) {
+    char arch[32] = {0};
+    obj_handle_t error = 0;
+    MTLDevice_setBinaryArchive(mtlDevice, nullptr, 0, arch, &error);
+    wm::error_text(error);
+    gpu_arch_name = arch[0] ? string(arch) : string("unknown");
+    fprintf(stderr, "[cycles-wm] GPU architecture %s\n", gpu_arch_name.c_str());
+  }
+  return gpu_arch_name;
+}
+
+/* Loads the kernels for exactly these features from the pack, if the pack has them for this GPU. */
+bool MetalDevice::load_prebuilt_kernels(const uint features)
+{
+  const string dir = kernel_pack_dir();
+  if (dir.empty() || getenv("CYCLES_WM_NO_PREBUILT")) {
+    return false;
+  }
+  /* The pack that has every feature the scene needs, and the fewest others (a kernel with more features than the scene uses is what Cycles' own generic kernels are). */
+  uint pack = 0;
+  bool found = false;
+  {
+    vector<uint8_t> list;
+    if (read_whole_file(dir + "/masks.txt", list)) {
+      const string text(list.begin(), list.end());
+      size_t pos = 0;
+      while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == string::npos) {
+          end = text.size();
+        }
+        const uint mask = uint(strtoul(text.substr(pos, end - pos).c_str(), nullptr, 16));
+        pos = end + 1;
+        if (mask && (mask & features) == features) {
+          if (!found || __builtin_popcount(mask) < __builtin_popcount(pack)) {
+            pack = mask;
+            found = true;
+          }
+        }
+      }
+    }
+  }
+  if (!found) {
+    return false;
+  }
+  const string base = string_printf("%s/%08x", dir.c_str(), pack);
+  vector<uint8_t> air, archive;
+  if (!read_whole_file(base + ".metallib", air)) {
+    return false;
+  }
+  const string arch = gpu_architecture();
+  if (!read_whole_file(base + "-" + arch + ".archive", archive)) {
+    fprintf(stderr, "[cycles-wm] a kernel pack for features 0x%x exists, but not for this GPU (%s)\n", pack, arch.c_str());
+    return false;
+  }
+  const double started = time_dt();
+  obj_handle_t error = 0;
+  obj_handle_t data = DispatchData_alloc_init(uint64_t(uintptr_t(air.data())), air.size());
+  obj_handle_t lib = data ? MTLDevice_newLibrary(mtlDevice, data, &error) : 0;
+  wm::error_text(error);
+  wm::release(data);
+  if (!lib) {
+    fprintf(stderr, "[cycles-wm] the kernel pack's library would not load\n");
+    return false;
+  }
+  error = 0;
+  const uint32_t ok = MTLDevice_setBinaryArchive(mtlDevice, archive.data(), archive.size(), nullptr, &error);
+  const string why = wm::error_text(error);
+  if (!ok) {
+    fprintf(stderr, "[cycles-wm] the kernel pack's GPU binaries would not load: %s\n", why.substr(0, 160).c_str());
+    wm::release(lib);
+    return false;
+  }
+  wm::release(mtlLibrary);
+  mtlLibrary = lib;
+  prebuilt_active = true;
+  fprintf(stderr, "[cycles-wm] kernels for features 0x%x (the scene needs 0x%x) loaded from the pack in %.2f s (library %zu KB, GPU binaries %zu KB): no compile on this device\n",
+          pack, features, time_dt() - started, air.size() >> 10, archive.size() >> 10);
+  return true;
+}
+
 bool MetalDevice::load_kernels(const uint _kernel_features)
 {
   fprintf(stderr, "[cycles-wm] load_kernels requested 0x%x (had 0x%x)\n", _kernel_features, kernel_features);
@@ -443,6 +586,25 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
   }
   if (drop_denoising) {
     kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
+  }
+  /* Kernels built ahead of time for exactly these features: used as they are, with every feature the scene needs. */
+  {
+    const string key = string_printf("prebuilt:%08x", kernel_features);
+    if (mtlLibrary && key == library_features_key) {
+      return true;
+    }
+    join_precompile();
+    prebuilt_active = false;
+    if (load_prebuilt_kernels(kernel_features)) {
+      library_features_key = key;
+      for (MetalPipeline &p : pipelines) {
+        wm::release(p.pipeline);
+        wm::release(p.function);
+        p = MetalPipeline();
+      }
+      start_precompile();
+      return true;
+    }
   }
 #  ifdef _WIN32
   /* Kernels built with transparent shadows kill the system's Metal compiler on the phone and the iPad (a scene that is otherwise the same,
@@ -571,6 +733,24 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
   info.max_total_threads_per_threadgroup = threads_per_threadgroup;
   info.flags = 1u;              /* the threadgroup size is a multiple of the execution width */
   info.immutable_buffers = 0x7; /* buffers 0, 1 and 2 are never written by the kernels */
+  if (prebuilt_active) {
+    WMTComputePipelineInfoEx archive_info = info;
+    archive_info.flags |= 2u;
+    obj_handle_t archive_error = 0;
+    p.pipeline = MTLDevice_newComputePipelineStateEx(mtlDevice, &archive_info, &archive_error);
+    wm::error_text(archive_error);
+    if (p.pipeline) {
+      WMTComputePipelineLimits lim = {};
+      MTLComputePipelineState_limits(p.pipeline, &lim);
+      fprintf(stderr, "[cycles-wm] pipeline %s from the GPU binaries (no compile)\n", device_kernel_as_string(kernel));
+      if (!num_threads_per_block) {
+        num_threads_per_block = round_down(lim.max_total_threads_per_threadgroup, lim.thread_execution_width);
+        num_threads_per_block = std::max(num_threads_per_block, (int)lim.thread_execution_width);
+      }
+      p.num_threads_per_block = num_threads_per_block;
+      return true;
+    }
+  }
   const double starttime = time_dt();
   string text_error;
   /* The big shading kernels are compiled one at a time (three of them at once need more memory than a phone can spare next to a big scene),

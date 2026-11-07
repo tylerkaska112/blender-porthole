@@ -334,6 +334,8 @@ struct WMTTextureInfo {
 
 WINEMETAL_API obj_handle_t MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info);
 
+WINEMETAL_API obj_handle_t MTLDevice_newLibrary(obj_handle_t device, obj_handle_t data, obj_handle_t *err_out);
+
 WINEMETAL_API obj_handle_t MTLLibrary_newFunction(obj_handle_t library, const char *name);
 
 WINEMETAL_API obj_handle_t MTLDevice_newLibraryWithSource(
@@ -352,6 +354,8 @@ struct WMTComputePipelineInfoEx {
 };
 
 WINEMETAL_API obj_handle_t MTLDevice_newComputePipelineStateEx(obj_handle_t device, const struct WMTComputePipelineInfoEx *info, obj_handle_t *err_out);
+
+WINEMETAL_API uint32_t MTLDevice_setBinaryArchive(obj_handle_t device, const void *bytes, uint64_t length, char *arch_out, obj_handle_t *err_out);
 
 struct WMTComputePipelineLimits {
  uint32_t max_total_threads_per_threadgroup;
@@ -520,6 +524,8 @@ enum WMTGPUFamily {
 };
 
 WINEMETAL_API bool MTLDevice_supportsFamily(obj_handle_t device, enum WMTGPUFamily gpu_family);
+
+WINEMETAL_API obj_handle_t DispatchData_alloc_init(uint64_t native_ptr, uint64_t length);
 
 WINEMETAL_API obj_handle_t MTLDevice_newResidencySet(obj_handle_t device, uint64_t initial_capacity);
 

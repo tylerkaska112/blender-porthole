@@ -65,6 +65,15 @@ struct unixcall_mtldevice_newtexture {
  obj_handle_t ret;
 };
 
+struct unixcall_mtldevice_newlibrary {
+ obj_handle_t device;
+ obj_handle_t data;
+ obj_handle_t ret_error;
+ obj_handle_t ret_library;
+};
+
+struct unixcall_set_archive { obj_handle_t device; uint64_t bytes; uint64_t length; uint64_t arch_out; obj_handle_t ret_error; uint64_t ret; };
+
 struct unixcall_pso_limits { obj_handle_t pipeline; uint64_t out; };
 
 struct unixcall_newpsoex { obj_handle_t device; uint64_t info; obj_handle_t ret_error; obj_handle_t ret; };
@@ -446,4 +455,43 @@ NSString_lengthOfBytesUsingEncoding(obj_handle_t str, enum WMTStringEncoding enc
   params.ret = 0;
   UNIX_CALL(27, &params);
   return (uint64_t)params.ret;
+}
+
+WINEMETAL_API uint32_t
+MTLDevice_setBinaryArchive(obj_handle_t device, const void *bytes, uint64_t length, char *arch_out, obj_handle_t *err_out) {
+  struct unixcall_set_archive params;
+  params.device = device;
+  params.bytes = PtrToUInt64(bytes);
+  params.length = length;
+  params.arch_out = PtrToUInt64(arch_out);
+  params.ret_error = 0;
+  params.ret = 0;
+  UNIX_CALL(171, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return (uint32_t)params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newLibrary(
+    obj_handle_t device, obj_handle_t data, obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newlibrary params;
+  params.device = device;
+  params.data = data;
+  params.ret_error = 0;
+  params.ret_library = 0;
+  UNIX_CALL(25, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return (obj_handle_t)params.ret_library;
+}
+
+WINEMETAL_API obj_handle_t
+DispatchData_alloc_init(uint64_t native_ptr, uint64_t length) {
+  struct unixcall_generic_obj_uint64_obj_ret params;
+  params.handle = native_ptr;
+  params.arg = length;
+  UNIX_CALL(114, &params);
+  return (obj_handle_t)params.ret;
 }
