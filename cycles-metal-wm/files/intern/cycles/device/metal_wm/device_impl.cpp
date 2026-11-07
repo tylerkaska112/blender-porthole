@@ -444,6 +444,18 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
   if (drop_denoising) {
     kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
   }
+#  ifdef _WIN32
+  /* Kernels built with transparent shadows kill the system's Metal compiler on the phone and the iPad (a scene that is otherwise the same,
+   * without them, compiles fine), and after that no kernel can be built until the app is restarted. Under Porthole they are left out:
+   * shadows of transparent surfaces then come out solid. CYCLES_WM_KEEP_TRANSPARENT=1 brings them back. */
+  {
+    const char *keep = getenv("CYCLES_WM_KEEP_TRANSPARENT");
+    if ((kernel_features & KERNEL_FEATURE_TRANSPARENT) && !(keep && atoi(keep) != 0)) {
+      fprintf(stderr, "[cycles-wm] leaving out transparent shadows (the system's compiler cannot build those kernels); shadows of transparent surfaces will be solid\n");
+      kernel_features &= ~uint(KERNEL_FEATURE_TRANSPARENT);
+    }
+  }
+#  endif
   return compile_library();
 }
 
@@ -567,7 +579,7 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
                       kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW ||
                       kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_FORWARD ||
                       kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND);
-  for (int attempt = 0; attempt < 3; attempt++) {
+  for (int attempt = 0; attempt < 2; attempt++) {
     obj_handle_t error = 0;
     {
       std::unique_lock<std::mutex> heavy_lock(heavy_compile_mutex, std::defer_lock);
@@ -591,8 +603,8 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
     }
 #  endif
     fprintf(stderr, "[cycles-wm] building %s was interrupted by the system (memory left %zu MB); trying again in %d s (attempt %d)\n",
-            device_kernel_as_string(kernel), left_mb, 3 * (attempt + 1), attempt + 2);
-    std::this_thread::sleep_for(std::chrono::seconds(3 * (attempt + 1)));
+            device_kernel_as_string(kernel), left_mb, 2 * (attempt + 1), attempt + 2);
+    std::this_thread::sleep_for(std::chrono::seconds(2 * (attempt + 1)));
   }
   if (!p.pipeline) {
     error_text = string_printf(
