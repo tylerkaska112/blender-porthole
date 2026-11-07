@@ -69,8 +69,14 @@ class MetalDevice : public Device {
   std::atomic<int> precompile_active{0};
   int precompile_total = 0;
   void start_precompile();
+  string preprocess_source_for(uint features);
   void join_precompile();
   void wait_for_kernels(double max_seconds);
+  bool drop_denoising = false;
+  string precompile_error;
+  std::atomic<int> precompile_failed_kernel{-1};
+  bool try_variant(uint features, DeviceKernel kernel, string &why);
+  void recover_after_failure(DeviceKernel kernel);
   bool build_pipeline(DeviceKernel kernel, MetalPipeline &out, string &error_text);
 
   struct MetalMem {
@@ -125,7 +131,7 @@ class MetalDevice : public Device {
 
   bool load_kernels(const uint kernel_features) override;
   /* The pipeline of a kernel, built on first use (null and an error on failure). */
-  const MetalPipeline *get_pipeline(DeviceKernel kernel);
+  const MetalPipeline *get_pipeline(DeviceKernel kernel, bool quiet = false);
 
   unique_ptr<DeviceQueue> gpu_queue_create() override;
 

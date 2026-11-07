@@ -32,6 +32,8 @@
 
 CCL_NAMESPACE_BEGIN
 
+static const std::vector<DeviceKernel> &core_kernel_list();
+
 /* Every MetalDevice that is alive: the viewport and a final render are two devices on one GPU and one process memory limit. */
 static std::mutex g_devices_mutex;
 static std::vector<const MetalDevice *> g_devices;
@@ -345,6 +347,11 @@ void MetalDevice::prepare_residency()
 
 string MetalDevice::preprocess_source()
 {
+  return preprocess_source_for(kernel_features);
+}
+
+string MetalDevice::preprocess_source_for(const uint features)
+{
   string global_defines;
 
   /* Kernels specialized for what the scene uses compile much faster than the generic ones (the A17 needed
@@ -357,7 +364,7 @@ string MetalDevice::preprocess_source()
     adaptive_compile = (atoi(env) != 0) || (env[0] != '0');
   }
   if (adaptive_compile) {
-    global_defines += "#define __KERNEL_FEATURES__ " + to_string(kernel_features) + "\n";
+    global_defines += "#define __KERNEL_FEATURES__ " + to_string(features) + "\n";
   }
   if (DebugFlags().metal.use_local_atomic_sort) {
     global_defines += "#define __KERNEL_LOCAL_ATOMIC_SORT__\n";
@@ -428,7 +435,15 @@ bool MetalDevice::compile_library()
 
 bool MetalDevice::load_kernels(const uint _kernel_features)
 {
+  fprintf(stderr, "[cycles-wm] load_kernels requested 0x%x (had 0x%x)\n", _kernel_features, kernel_features);
   kernel_features |= _kernel_features;
+  /* Test knob: extra feature bits (hex) forced on, to compile the kernels the way a scene with those features would. */
+  if (const char *extra = getenv("CYCLES_WM_FEATURES_OR")) {
+    kernel_features |= uint(strtoul(extra, nullptr, 0));
+  }
+  if (drop_denoising) {
+    kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
+  }
   return compile_library();
 }
 
@@ -449,6 +464,12 @@ bool MetalDevice::is_ready(string &status) const
 
 bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, string &error_text)
 {
+  /* Test knob for the recovery path: this kernel "fails" while the denoising feature is on. */
+  if (getenv("CYCLES_WM_TEST_FAIL") && kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND && (kernel_features & KERNEL_FEATURE_DENOISING)) {
+    error_text = "test failure";
+    return false;
+  }
+
   const string function_name = string("cycles_metal_") + device_kernel_as_string(kernel);
   p.function = MTLLibrary_newFunction(mtlLibrary, function_name.c_str());
   if (!p.function) {
@@ -546,7 +567,7 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
                       kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW ||
                       kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_FORWARD ||
                       kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND);
-  for (int attempt = 0; attempt < 6; attempt++) {
+  for (int attempt = 0; attempt < 3; attempt++) {
     obj_handle_t error = 0;
     {
       std::unique_lock<std::mutex> heavy_lock(heavy_compile_mutex, std::defer_lock);
@@ -601,7 +622,117 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
   return true;
 }
 
-const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
+/* Builds one kernel from a library compiled for the given features, only to see whether the compiler gets through it. */
+bool MetalDevice::try_variant(const uint features, const DeviceKernel kernel, string &why)
+{
+  string text = "\n#include \"kernel/device/metal/kernel.metal\"\n";
+  text = path_source_replace_includes(text, path_get("source"));
+  const string src = preprocess_source_for(features) + text;
+  obj_handle_t error = 0;
+  obj_handle_t lib = MTLDevice_newLibraryWithSource(mtlDevice, src.data(), src.size(), 0x0302, WMT_LIBRARY_FLAG_FAST_MATH, &error);
+  string err = wm::error_text(error);
+  if (!lib) {
+    why = "library: " + err.substr(0, 120);
+    return false;
+  }
+  const string name = string("cycles_metal_") + device_kernel_as_string(kernel);
+  obj_handle_t fn = MTLLibrary_newFunction(lib, name.c_str());
+  bool ok = false;
+  if (fn) {
+    WMTComputePipelineInfoEx info = {};
+    info.compute_function = fn;
+    info.max_total_threads_per_threadgroup = 64;
+    info.flags = 1u;
+    info.immutable_buffers = 0x7;
+    error = 0;
+    obj_handle_t pso = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
+    err = wm::error_text(error);
+    ok = pso != 0;
+    if (!ok) {
+      why = err.substr(0, 120);
+    }
+    wm::release(pso);
+    wm::release(fn);
+  }
+  else {
+    why = "no such function";
+  }
+  wm::release(lib);
+  return ok;
+}
+
+/* A kernel the compiler would not build: find out which scene feature is the problem (the same kernel without each of the suspects),
+ * and if it is the denoising data, carry on without that feature instead of failing the render. */
+void MetalDevice::recover_after_failure(const DeviceKernel kernel)
+{
+  const uint features = kernel_features;
+  fprintf(stderr, "[cycles-wm] %s would not build with features 0x%x (%s); trying it without some of them\n",
+          device_kernel_as_string(kernel), features, precompile_error.substr(0, 100).c_str());
+  struct Suspect {
+    const char *name;
+    uint bits;
+  };
+  const Suspect suspects[] = {
+      {"denoising", uint(KERNEL_FEATURE_DENOISING)},
+      {"light tree", uint(KERNEL_FEATURE_LIGHT_TREE)},
+      {"transparent", uint(KERNEL_FEATURE_TRANSPARENT)},
+      {"emission nodes", uint(KERNEL_FEATURE_NODE_EMISSION)},
+      {"denoising + light tree + transparent", uint(KERNEL_FEATURE_DENOISING | KERNEL_FEATURE_LIGHT_TREE | KERNEL_FEATURE_TRANSPARENT)},
+  };
+  bool denoising_fixes_it = false;
+  for (const Suspect &s : suspects) {
+    if (!(features & s.bits)) {
+      continue;
+    }
+    string why;
+    const double started = time_dt();
+    const bool ok = try_variant(features & ~s.bits, kernel, why);
+    fprintf(stderr, "[cycles-wm]   without %s: %s in %.1f s%s%s\n", s.name, ok ? "builds" : "FAILS", time_dt() - started, ok ? "" : " - ", why.c_str());
+    if (ok && s.bits == uint(KERNEL_FEATURE_DENOISING)) {
+      denoising_fixes_it = true;
+    }
+  }
+
+  if (!denoising_fixes_it) {
+    set_error(precompile_error.empty() ? "A render kernel could not be built." : precompile_error);
+    return;
+  }
+
+  fprintf(stderr, "[cycles-wm] carrying on without the denoising data kernels (a denoiser then works without its guide passes)\n");
+  drop_denoising = true;
+  kernel_features &= ~uint(KERNEL_FEATURE_DENOISING);
+  library_features_key = preprocess_source();
+  string text = "\n#include \"kernel/device/metal/kernel.metal\"\n";
+  text = path_source_replace_includes(text, path_get("source"));
+  source = preprocess_source() + text;
+  wm::release(mtlLibrary);
+  obj_handle_t error = 0;
+  mtlLibrary = MTLDevice_newLibraryWithSource(mtlDevice, source.data(), source.size(), 0x0302, WMT_LIBRARY_FLAG_FAST_MATH, &error);
+  const string lib_error = wm::error_text(error);
+  if (!mtlLibrary) {
+    set_error("Failed to compile library:\n" + lib_error);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(pipeline_mutex);
+    for (MetalPipeline &p : pipelines) {
+      wm::release(p.pipeline);
+      wm::release(p.function);
+      p = MetalPipeline();
+    }
+  }
+  for (const DeviceKernel k : core_kernel_list()) {
+    obj_handle_t probe = MTLLibrary_newFunction(mtlLibrary, (string("cycles_metal_") + device_kernel_as_string(k)).c_str());
+    if (probe) {
+      wm::release(probe);
+      if (!get_pipeline(k, false)) {
+        return; /* the error is set */
+      }
+    }
+  }
+}
+
+const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel, const bool quiet)
 {
   MetalPipeline &p = pipelines[kernel];
   {
@@ -633,6 +764,12 @@ const MetalPipeline *MetalDevice::get_pipeline(const DeviceKernel kernel)
     p.failed = true;
   }
   wm::release(built.function);
+  if (quiet) {
+    /* The up-front builds report their failures themselves (recover_after_failure). */
+    std::lock_guard<std::mutex> lock(pipeline_mutex);
+    precompile_error = error_text;
+    return nullptr;
+  }
   set_error(error_text);
   return nullptr;
 }
@@ -664,17 +801,10 @@ void MetalDevice::join_precompile()
   precompile_active = 0;
 }
 
-void MetalDevice::start_precompile()
+/* The kernels nearly every render uses (a plain surface scene with lights). */
+static const std::vector<DeviceKernel> &core_kernel_list()
 {
-  join_precompile();
-  if (!mtlLibrary) {
-    return;
-  }
-
-  /* The kernels nearly every render uses (a plain surface scene with lights). The rest (volumes, MNEE, raytrace
-   * shading, subsurface, bake, denoising helpers) are built the first time a scene needs them: building all 77
-   * took 244 s of compile time on an M4. */
-  static const DeviceKernel core[] = {
+  static const std::vector<DeviceKernel> list = {
       DEVICE_KERNEL_INTEGRATOR_RESET,
       DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA,
       DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST,
@@ -698,9 +828,24 @@ void MetalDevice::start_precompile()
       DEVICE_KERNEL_SHADER_EVAL_BACKGROUND,
       DEVICE_KERNEL_PREFIX_SUM,
   };
+  return list;
+}
+
+void MetalDevice::start_precompile()
+{
+  join_precompile();
+  if (!mtlLibrary) {
+    return;
+  }
+
+  /* The kernels nearly every render uses (a plain surface scene with lights). The rest (volumes, MNEE, raytrace
+   * shading, subsurface, bake, denoising helpers) are built the first time a scene needs them: building all 77
+   * took 244 s of compile time on an M4. */
+  const std::vector<DeviceKernel> &core = core_kernel_list();
   precompile_next = 0;
   precompile_done = 0;
-  precompile_total = int(sizeof(core) / sizeof(core[0]));
+  precompile_failed_kernel = -1;
+  precompile_total = int(core.size());
   int workers = 3;
 #  ifdef _WIN32
   /* A phone next to a big scene: the system stops the compiler service when memory runs short, and every compile that runs
@@ -726,7 +871,7 @@ void MetalDevice::start_precompile()
   fprintf(stderr, "[cycles-wm] building %d core kernel pipelines on %d threads\n", precompile_total, workers);
 
   for (int w = 0; w < workers; w++) {
-    precompile_threads.emplace_back([this, w]() {
+    precompile_threads.emplace_back([this, w, &core]() {
       (void)w;
       const double started = time_dt();
       for (;;) {
@@ -735,16 +880,23 @@ void MetalDevice::start_precompile()
           break;
         }
         const DeviceKernel kernel = core[index];
-        if (!have_error()) {
+        if (!have_error() && precompile_failed_kernel.load() < 0) {
           /* Kernels the library does not have are skipped here; the queue reports the ones it needs. */
           const string function_name = string("cycles_metal_") + device_kernel_as_string(kernel);
           obj_handle_t probe = MTLLibrary_newFunction(mtlLibrary, function_name.c_str());
           if (probe) {
             wm::release(probe);
-            get_pipeline(kernel);
+            if (!get_pipeline(kernel, true)) {
+              int none = -1;
+              precompile_failed_kernel.compare_exchange_strong(none, int(kernel));
+            }
           }
         }
         precompile_done++;
+      }
+      if (precompile_active.load() == 1 && precompile_failed_kernel.load() >= 0) {
+        /* The last worker: nothing else is building. Try to find out why, and to carry on without it. */
+        recover_after_failure(DeviceKernel(precompile_failed_kernel.load()));
       }
       if (--precompile_active == 0) {
         fprintf(stderr, "[cycles-wm] all kernel pipelines ready (%.1f s)\n", time_dt() - started);
