@@ -69,6 +69,10 @@ class MetalDeviceQueue : public DeviceQueue {
   double last_report_ = 0.0;
   std::map<string, int> readback_counts_;
   void log_state_summary();
+  string describe_address(uint64_t address);
+  void probe_counter_write();
+  bool probe_done_ = false;
+  DeviceKernel last_kernel_ = DEVICE_KERNEL_NUM;
   int n_state_logs_ = 0;
   int dispatch_logs_[DEVICE_KERNEL_NUM] = {};
 };

@@ -69,6 +69,7 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
                << max_safe_state_count;
       state_count = max_safe_state_count;
     }
+#  ifndef _WIN32
     else {
       size_t grow_percent = 50;
       if (auto *str = getenv("CYCLES_METAL_GROW_PERCENT")) {
@@ -81,6 +82,7 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
         }
       }
     }
+#  endif
   }
   else {
     metal_device_->set_error("Out of memory - couldn't allocate integrator state");
@@ -142,7 +144,14 @@ void MetalDeviceQueue::new_command_buffer()
 obj_handle_t MetalDeviceQueue::get_compute_encoder(DeviceKernel kernel)
 {
   /* The kernels of the integrator may run concurrently (they synchronize through the queue counters). */
-  const bool concurrent = int(kernel) < int(DEVICE_GPU_KERNEL_INTEGRATOR_NUM);
+  bool concurrent = int(kernel) < int(DEVICE_GPU_KERNEL_INTEGRATOR_NUM);
+#  ifdef _WIN32
+  /* Under Porthole the dispatches run one after the other: CYCLES_METAL_CONCURRENT=1 brings the overlap back. */
+  const char *conc_env = getenv("CYCLES_METAL_CONCURRENT");
+  if (!(conc_env && atoi(conc_env) != 0)) {
+    concurrent = false;
+  }
+#  endif
 
   if (mtlComputeEncoder_) {
     if (compute_encoder_concurrent_ == concurrent) {
@@ -285,6 +294,131 @@ void MetalDeviceQueue::log_state_summary()
   }
 }
 
+/* Which buffer an address points into ("name + offset"), for the logs. */
+string MetalDeviceQueue::describe_address(uint64_t address)
+{
+  if (address == 0) {
+    return "(null)";
+  }
+  std::lock_guard<std::recursive_mutex> lock(metal_device_->metal_mem_map_mutex);
+  for (auto &it : metal_device_->metal_mem_map) {
+    const wm::Buffer &b = it.second->buffer;
+    if (b.gpu_address && address >= b.gpu_address && address < b.gpu_address + b.size) {
+      const string nm = it.second->mem ? it.second->mem->log_name() : string("?");
+      return string_printf("-> \"%s\" + %llu (buffer of %llu bytes)",
+                           nm.c_str(),
+                           (unsigned long long)(address - b.gpu_address),
+                           (unsigned long long)b.size);
+    }
+  }
+  const wm::Buffer &lb = metal_device_->launch_params_buffer;
+  if (lb.gpu_address && address >= lb.gpu_address && address < lb.gpu_address + lb.size) {
+    return "-> launch params";
+  }
+  return "-> NO BUFFER (not an address the device knows)";
+}
+
+/* After the first init_from_camera the queue counters read zero. This puts a one-line kernel of our own on the same queue
+ * and has it write into the real queue-counter buffer: if the numbers arrive, the GPU can write that buffer and the
+ * Cycles kernels are what leaves it empty. If not, the buffer is not reachable the way the self-test's buffers are. */
+void MetalDeviceQueue::probe_counter_write()
+{
+  probe_done_ = true;
+  MetalDevice::MetalMem *target = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> lock(metal_device_->metal_mem_map_mutex);
+    for (auto &it : metal_device_->metal_mem_map) {
+      device_memory *mem = it.second->mem;
+      if (mem && it.second->hostPtr && mem->log_name().find("queue_counter") != string::npos) {
+        target = it.second.get();
+        break;
+      }
+    }
+  }
+  if (!target || target->size < 16) {
+    fprintf(stderr, "[cycles-wm] probe: no queue-counter buffer\n");
+    return;
+  }
+  volatile unsigned *v = (volatile unsigned *)target->hostPtr;
+  const size_t count = std::min<size_t>(target->size / sizeof(int), 20);
+  for (size_t i = 0; i < count; i++) {
+    if (v[i] != 0) {
+      return; /* the counters moved: nothing to probe */
+    }
+  }
+  const size_t last = target->size / sizeof(int) - 1;
+  const unsigned saved_last = v[last], saved_prev = v[last - 1];
+
+  const char *src =
+      "#include <metal_stdlib>\nusing namespace metal;\n"
+      "kernel void wm_probe(constant ulong *args [[buffer(0)]], uint tid [[thread_position_in_grid]]) {\n"
+      "  device atomic_uint *c = (device atomic_uint *)args[0];\n"
+      "  device uint *p = (device uint *)args[1];\n"
+      "  atomic_fetch_add_explicit(c, 1u, memory_order_relaxed);\n"
+      "  if (tid == 0) { p[0] = 0xABCD1234u; }\n"
+      "}\n";
+  obj_handle_t error = 0;
+  obj_handle_t lib = MTLDevice_newLibraryWithSource(metal_device_->mtlDevice, src, strlen(src), 0x0302, 0, &error);
+  string text = wm::error_text(error);
+  if (!lib) {
+    fprintf(stderr, "[cycles-wm] probe: library did not compile: %s\n", text.c_str());
+    return;
+  }
+  obj_handle_t fn = MTLLibrary_newFunction(lib, "wm_probe");
+  WMTComputePipelineInfoEx info = {};
+  info.compute_function = fn;
+  info.max_total_threads_per_threadgroup = 64;
+  info.flags = 1u;
+  info.immutable_buffers = 0;
+  error = 0;
+  obj_handle_t pso = MTLDevice_newComputePipelineStateEx(metal_device_->mtlDevice, &info, &error);
+  text = wm::error_text(error);
+  if (!pso) {
+    fprintf(stderr, "[cycles-wm] probe: pipeline did not build: %s\n", text.c_str());
+    wm::release(fn);
+    wm::release(lib);
+    return;
+  }
+
+  uint64_t args[2] = {target->buffer.gpu_address + last * sizeof(int),
+                      target->buffer.gpu_address + (last - 1) * sizeof(int)};
+  obj_handle_t cb = MTLCommandQueue_commandBuffer(mtlCommandQueue_);
+  obj_handle_t enc = MTLCommandBuffer_computeCommandEncoder(cb, false);
+  wmtcmd_compute_setpso set_pso = {};
+  set_pso.type = WMTComputeCommandSetPSO;
+  set_pso.pso = pso;
+  set_pso.threadgroup_size = {64, 1, 1};
+  wmtcmd_compute_setbytes set_args = {};
+  set_args.type = WMTComputeCommandSetBytes;
+  set_args.bytes.ptr = args;
+  set_args.length = sizeof(args);
+  set_args.index = 0;
+  wmtcmd_compute_dispatch dispatch = {};
+  dispatch.type = WMTComputeCommandDispatchThreads;
+  dispatch.size = {16, 1, 1};
+  set_pso.next.ptr = &set_args;
+  set_args.next.ptr = &dispatch;
+  dispatch.next.ptr = nullptr;
+  MTLComputeCommandEncoder_encodeCommands(enc, (wmtcmd_base *)&set_pso);
+  MTLCommandEncoder_endEncoding(enc);
+  MTLCommandBuffer_commit(cb);
+  MTLCommandBuffer_waitUntilCompleted(cb);
+  const int status = int(MTLCommandBuffer_status(cb));
+  fprintf(stderr,
+          "[cycles-wm] probe: the queue counters were all zero after init_from_camera; own kernel on the real counter buffer: "
+          "status %d, atomic word %u (16 expected), plain store 0x%X (0xABCD1234 expected) -> %s\n",
+          status,
+          v[last],
+          (unsigned)v[last - 1],
+          (v[last] == saved_last + 16 && v[last - 1] == 0xABCD1234u) ? "THE GPU CAN WRITE THIS BUFFER" :
+                                                                       "THE GPU CANNOT WRITE THIS BUFFER");
+  v[last] = saved_last;
+  v[last - 1] = saved_prev;
+  wm::release(pso);
+  wm::release(fn);
+  wm::release(lib);
+}
+
 bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
                                const int work_size,
                                const DeviceKernelArguments &args)
@@ -295,6 +429,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
 
   debug_enqueue_begin(kernel, work_size);
   n_enqueue_++;
+  last_kernel_ = kernel;
   report_activity(device_kernel_as_string(kernel));
 
   const MetalPipeline *pipeline = metal_device_->get_pipeline(kernel);
@@ -393,6 +528,19 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
             num_threads_per_block,
             shared_mem_bytes,
             dynamic_bytes_written);
+    /* The arguments as 64-bit words, with the buffer each one points into. */
+    for (size_t off = 0; off + 8 <= dynamic_bytes_written; off += 8) {
+      uint64_t w;
+      memcpy(&w, dynamic_args + off, 8);
+      fprintf(stderr, "[cycles-wm]   arg word %zu = 0x%llx %s\n", off / 8, (unsigned long long)w, describe_address(w).c_str());
+    }
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA) {
+      const uint64_t *lp = (const uint64_t *)&metal_device_->launch_params->integrator_state;
+      const size_t n = offsetof(IntegratorStateGPU, sort_partition_divisor) / 8;
+      for (size_t i = 0; i < n; i++) {
+        fprintf(stderr, "[cycles-wm]   launch integrator_state[%zu] = 0x%llx %s\n", i, (unsigned long long)lp[i], describe_address(lp[i]).c_str());
+      }
+    }
   }
 
   wmtcmd_compute_setpso set_pso = {};
@@ -490,6 +638,9 @@ bool MetalDeviceQueue::synchronize()
   }
   pending_readbacks_.clear();
   log_state_summary();
+  if (!probe_done_ && last_kernel_ == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA) {
+    probe_counter_write();
+  }
 
   debug_synchronize();
 
