@@ -8,6 +8,15 @@
 #  include "device/metal_wm/queue.h"
 
 #  include <cmath>
+#  ifdef _WIN32
+#    ifndef NOMINMAX
+#      define NOMINMAX
+#    endif
+#    ifndef WIN32_LEAN_AND_MEAN
+#      define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <windows.h>
+#  endif
 
 #  include "util/half.h"
 #  include "util/time.h"
@@ -89,6 +98,21 @@ int MetalDeviceQueue::num_concurrent_states(const size_t state_size) const
     metal_device_->set_error("Out of memory - couldn't allocate integrator state");
     state_count = 0;
   }
+
+#  ifdef _WIN32
+  /* Under Porthole the process lives next to a big scene: never take more than a fifth of the memory that is left (Porthole reports what iOS would still give us). */
+  {
+    MEMORYSTATUSEX status = {};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status) && state_count > 0) {
+      const size_t cap = size_t(status.ullAvailPhys / 5) / state_size / 4096 * 4096;
+      fprintf(stderr, "[cycles-wm] memory left %zu MB: states capped at %zu\n", size_t(status.ullAvailPhys >> 20), cap);
+      if (cap >= 65536 && cap < state_count) {
+        state_count = cap;
+      }
+    }
+  }
+#  endif
 
   fprintf(stderr,
           "[cycles-wm] integrator states: %zu x %zu bytes, budget %zu MB, in use %zu MB\n",

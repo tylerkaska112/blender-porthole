@@ -528,10 +528,31 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
   info.max_total_threads_per_threadgroup = threads_per_threadgroup;
   info.flags = 1u;              /* the threadgroup size is a multiple of the execution width */
   info.immutable_buffers = 0x7; /* buffers 0, 1 and 2 are never written by the kernels */
-  obj_handle_t error = 0;
   const double starttime = time_dt();
-  p.pipeline = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
-  const string text_error = wm::error_text(error);
+  string text_error;
+  /* The big shading kernels are compiled one at a time (three of them at once need more memory than a phone can spare next to a big scene),
+   * and a compile the system interrupted (it stops the compiler service when memory runs short) is tried again after a pause. */
+  const bool heavy = (kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_NEE ||
+                      kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW ||
+                      kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_LIGHT_FORWARD ||
+                      kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND);
+  for (int attempt = 0; attempt < 6; attempt++) {
+    obj_handle_t error = 0;
+    {
+      std::unique_lock<std::mutex> heavy_lock(heavy_compile_mutex, std::defer_lock);
+      if (heavy) {
+        heavy_lock.lock();
+      }
+      p.pipeline = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
+    }
+    text_error = wm::error_text(error);
+    if (p.pipeline || (text_error.find("INTERRUPTED") == string::npos && text_error.find("nterrupted") == string::npos)) {
+      break;
+    }
+    fprintf(stderr, "[cycles-wm] building %s was interrupted by the system (low memory?); trying again in %.1f s (attempt %d)\n",
+            device_kernel_as_string(kernel), 1.5 * (attempt + 1), attempt + 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500 * (attempt + 1)));
+  }
   if (!p.pipeline) {
     error_text = string_printf(
         "Failed to build the pipeline for %s:\n%s", device_kernel_as_string(kernel), text_error.c_str());

@@ -59,6 +59,7 @@ class MetalDevice : public Device {
 
   MetalPipeline pipelines[DEVICE_KERNEL_NUM];
   std::mutex pipeline_mutex;
+  std::mutex heavy_compile_mutex;
 
   /* The pipelines are built up front on a few threads (the first sample would otherwise wait for all of them,
    * one after the other, and Blender would show nothing). is_ready() reports the progress. */
