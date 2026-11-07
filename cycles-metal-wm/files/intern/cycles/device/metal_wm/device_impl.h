@@ -79,7 +79,10 @@ class MetalDevice : public Device {
   string gpu_architecture();
   bool load_prebuilt_kernels(uint features);
   bool prebuilt_active = false;
+  bool prebuilt_disabled = false;   /* the pack did not fit this device: the kernels are compiled as before */
   string gpu_arch_name;
+  string ios_version();
+  bool probe_prebuilt();
   void log_memory_breakdown(const char *when);
   bool drop_denoising = false;
   string precompile_error;

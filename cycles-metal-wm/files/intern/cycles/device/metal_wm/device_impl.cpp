@@ -493,6 +493,23 @@ string MetalDevice::kernel_pack_dir()
   return "";
 }
 
+/* The iOS/iPadOS version Porthole is running on ("27.2"), which it writes for programs at every start. The GPU binaries of a pack only fit the version they were built for. */
+string MetalDevice::ios_version()
+{
+  if (const char *env = getenv("CYCLES_WM_IOS_VERSION")) {
+    return env;
+  }
+  vector<uint8_t> marker;
+  if (read_whole_file("C:\\windows\\porthole-ios-version", marker)) {
+    string v(marker.begin(), marker.end());
+    while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) {
+      v.pop_back();
+    }
+    return v;
+  }
+  return "";
+}
+
 string MetalDevice::gpu_architecture()
 {
   if (gpu_arch_name.empty()) {
@@ -546,8 +563,9 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
     return false;
   }
   const string arch = gpu_architecture();
-  if (!read_whole_file(base + "-" + arch + ".archive", archive)) {
-    fprintf(stderr, "[cycles-wm] a kernel pack for features 0x%x exists, but not for this GPU (%s)\n", pack, arch.c_str());
+  const string os = ios_version();
+  if (os.empty() || !read_whole_file(base + "-" + arch + "-" + os + ".archive", archive)) {
+    fprintf(stderr, "[cycles-wm] a kernel pack for features 0x%x exists, but not for this GPU and system (%s, iOS %s)\n", pack, arch.c_str(), os.c_str());
     return false;
   }
   const double started = time_dt();
@@ -576,6 +594,30 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
   return true;
 }
 
+/* Does this device take the pack's GPU binaries? The first kernel is built from them, with no compile; if that does not work the pack is dropped and the kernels are compiled as before. */
+bool MetalDevice::probe_prebuilt()
+{
+  obj_handle_t fn = MTLLibrary_newFunction(mtlLibrary, "cycles_metal_integrator_reset");
+  if (!fn) {
+    return false;
+  }
+  WMTComputePipelineInfoEx info = {};
+  info.compute_function = fn;
+  info.max_total_threads_per_threadgroup = 64;
+  info.flags = 1u | 2u;
+  info.immutable_buffers = 0x7;
+  obj_handle_t error = 0;
+  obj_handle_t pso = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
+  const string why = wm::error_text(error);
+  wm::release(fn);
+  if (!pso) {
+    fprintf(stderr, "[cycles-wm] the pack's GPU binaries do not fit this device (%s); compiling the kernels here instead\n", why.empty() ? "no matching pipeline in the archive" : why.substr(0, 160).c_str());
+    return false;
+  }
+  wm::release(pso);
+  return true;
+}
+
 bool MetalDevice::load_kernels(const uint _kernel_features)
 {
   fprintf(stderr, "[cycles-wm] load_kernels requested 0x%x (had 0x%x)\n", _kernel_features, kernel_features);
@@ -595,7 +637,14 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
     }
     join_precompile();
     prebuilt_active = false;
-    if (load_prebuilt_kernels(kernel_features)) {
+    bool from_pack = !prebuilt_disabled && load_prebuilt_kernels(kernel_features);
+    if (from_pack && !probe_prebuilt()) {
+      from_pack = false;
+      prebuilt_active = false;
+      prebuilt_disabled = true;
+      wm::release(mtlLibrary);
+    }
+    if (from_pack) {
       library_features_key = key;
       for (MetalPipeline &p : pipelines) {
         wm::release(p.pipeline);
