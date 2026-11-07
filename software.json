@@ -14,7 +14,51 @@
       "swapMB": 0,
       "desktop": true,
       "symbol": "cube.transparent.fill",
-      "notes": "A kernel pack without GPU binaries for this device now leaves out transparent shadows instead of failing; the other kernels still come from the pack."
+      "notes": "A kernel pack without GPU binaries for this device now leaves out transparent shadows instead of failing; the other kernels still come from the pack.",
+      "known": [
+        {
+          "kind": "limitation",
+          "title": "Shadows of see-through surfaces need a pack made for your device",
+          "detail": "Leaves, glass and other see-through surfaces cast correct shadows on the GPU only with the GPU kernels made for your exact GPU and system version. Today those exist for the iPhone 15 Pro on iOS 27.2 and the iPad Pro (M4) on iPadOS 27.0. On any other device their shadows render solid. After a system update the pack you have keeps working, without those shadows, until a new one is published.",
+          "found": "found in build 14, still true in build 19"
+        },
+        {
+          "kind": "limitation",
+          "title": "GPU rendering uses more memory than CPU rendering",
+          "detail": "Textures are kept twice while rendering on the GPU, once for the GPU and once on the device's side, and the render's working memory comes on top. Blender keeps its GPU data to a budget of about 2.5 GB on an iPhone 15 Pro. A very large scene can still run out and close Blender: render that one on the CPU.",
+          "found": "build 15 onwards"
+        },
+        {
+          "kind": "limitation",
+          "title": "Without a pack made for your device, the first render takes longer to start",
+          "detail": "With the pack made for your device the render starts within seconds. With the one that works anywhere, part of the render kernels are built on the device first, which can take about a minute.",
+          "found": "build 19"
+        },
+        {
+          "kind": "limitation",
+          "title": "Everything but the GPU render runs through emulation",
+          "detail": "Blender is the Windows program for Arm. The interface, modifiers and CPU renders run through Porthole's emulator and are slower than on a PC or a Mac. On a simple scene the GPU render was about three times faster than the CPU on an iPhone 15 Pro.",
+          "found": "measured in build 14"
+        },
+        {
+          "kind": "limitation",
+          "title": "Touch navigation covers the view only",
+          "detail": "Two fingers pan, pinch zooms and a slide orbits the view, with a column of view buttons beside it. Other tools, such as sculpting and typing values, still work best with a keyboard and a mouse.",
+          "found": "Porthole 1.3.42 onwards"
+        },
+        {
+          "kind": "problem",
+          "title": "Apple's shader compiler is stopped when it has to build the biggest kernels",
+          "detail": "iOS ends its Metal compiler service when the kernels with transparent shadows are built on the device. Blender then carries on without those shadows. The packs made for a device avoid this because nothing is built on it; the pack that works anywhere leaves those shadows out on purpose.",
+          "found": "found in builds 11 to 18"
+        },
+        {
+          "kind": "problem",
+          "title": "Only two devices have been tested",
+          "detail": "GPU rendering was checked on an iPhone 15 Pro (iOS 27.2) and an iPad Pro (M4, iPadOS 27.0), each with the pack made for it. The pack that works anywhere was checked on the iPhone only. Other GPUs should use it, but they have not been tested, so a report from one helps.",
+          "found": "as of build 19"
+        }
+      ]
     },
     {
       "id": "blender-kernels-applegpu_g16g-ios27.0",
@@ -30,7 +74,8 @@
       "arch": "applegpu_g16g",
       "os": "27.0",
       "library": false,
-      "notes": "For the iPad Pro (M4) on iPadOS 27.0. Also usable after a system update (without transparent shadows) until a pack for the new version is out."
+      "notes": "For the iPad Pro (M4) on iPadOS 27.0. Also usable after a system update (without transparent shadows) until a pack for the new version is out.",
+      "addonFor": "blender"
     },
     {
       "id": "blender-kernels-applegpu_g16p-ios27.2",
@@ -46,12 +91,13 @@
       "arch": "applegpu_g16p",
       "os": "27.2",
       "library": false,
-      "notes": "For the iPhone 15 Pro (A17 Pro) on iOS 27.2. Also usable after a system update (without transparent shadows) until a pack for the new version is out."
+      "notes": "For the iPhone 15 Pro (A17 Pro) on iOS 27.2. Also usable after a system update (without transparent shadows) until a pack for the new version is out.",
+      "addonFor": "blender"
     },
     {
       "id": "blender-kernels-universal",
-      "title": "Blender GPU kernels (universal, test)",
-      "summary": "A test: shader code built ahead of time that works on any GPU and system version. The phone only builds the GPU code from it. It replaces the device-specific kernels above; download those again to go back.",
+      "title": "Blender GPU kernels (any device)",
+      "summary": "Render kernels that work on any GPU and system version, with solid shadows from see-through surfaces. Use it if no pack made for your device is offered.",
       "version": "build 19",
       "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-universal-b19.zip",
       "sha256": "3bc1aa26288566035fba72fa29951faa70bf19c455fc628c9fc8c68ac72bb1c6",
@@ -60,7 +106,8 @@
       "folder": "Blender Kernels",
       "symbol": "bolt.horizontal.fill",
       "library": false,
-      "notes": "Any device: the shader code only, GPU code built on the device, without transparent shadows."
+      "notes": "Any device: the shader code only, GPU code built on the device, without transparent shadows.",
+      "addonFor": "blender"
     }
   ]
 }
