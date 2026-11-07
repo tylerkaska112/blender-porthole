@@ -4,17 +4,17 @@
       "id": "blender",
       "title": "Blender 5.2.3 (GPU rendering)",
       "summary": "Blender with Cycles rendering on this device's GPU through Metal. A Windows Arm64 build; the first start compiles the render kernels (about 30 seconds).",
-      "version": "5.2.3 build 18",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b18.zip",
-      "sha256": "0fb045d2d1cd4cfa416c01fc97b7a2c7055c0fc827d03c3e9380f7fb84eaae42",
-      "bytes": 269194294,
+      "version": "5.2.3 build 19",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b19.zip",
+      "sha256": "57f25791f974ec9f43bde2eb66b3b29fef13fe86234c317e8c711456390e8c9e",
+      "bytes": 269194424,
       "exe": "blender.exe",
       "folder": "Blender",
       "vramMB": 4096,
       "swapMB": 0,
       "desktop": true,
       "symbol": "cube.transparent.fill",
-      "notes": "Test: a universal kernel pack (shader code only) can be used on any GPU and system version."
+      "notes": "A kernel pack without GPU binaries for this device now leaves out transparent shadows instead of failing; the other kernels still come from the pack."
     },
     {
       "id": "blender-kernels-applegpu_g16g-ios27.0",
