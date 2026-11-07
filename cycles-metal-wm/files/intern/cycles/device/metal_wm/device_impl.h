@@ -176,6 +176,8 @@ class MetalDevice : public Device {
   size_t recommended_working_set() const;
   /* What all live Metal devices of this process hold (the viewport and a final render are two devices). */
   size_t total_mem_used() const;
+  /* Runs a tiny kernel through the same path Cycles uses (GPU addresses in the argument bytes, residency set) and logs whether the GPU read, wrote and counted correctly. */
+  void self_test();
 
   string preprocess_source();
   bool compile_library();

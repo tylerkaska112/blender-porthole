@@ -205,9 +205,12 @@ void MetalDeviceQueue::report_activity(const char *kernel_name)
 void MetalDeviceQueue::log_readback(device_memory &mem)
 {
   /* Summary of what the GPU wrote: all zeros would mean the kernels ran but produced nothing. */
-  if (n_readbacks_logged_ >= 40 || !mem.host_pointer || mem.memory_size() == 0) {
+  /* At most 12 summaries per buffer name, so the display buffer cannot crowd out the render buffer. */
+  const string readback_name = mem.log_name();
+  if (!mem.host_pointer || mem.memory_size() == 0 || readback_counts_[readback_name] >= 12) {
     return;
   }
+  readback_counts_[readback_name]++;
   size_t count = 0;
   const bool is_float = (mem.data_type == TYPE_FLOAT);
   const bool is_half = (mem.data_type == TYPE_HALF);
@@ -237,7 +240,6 @@ void MetalDeviceQueue::log_readback(device_memory &mem)
     vmin = std::min<double>(vmin, v);
     vmax = std::max<double>(vmax, v);
   }
-  n_readbacks_logged_++;
   fprintf(stderr,
           "[cycles-wm] readback \"%s\": %zu values checked, %zu non-zero, %zu NaN, min %g, max %g, mean %g\n",
           mem.log_name().c_str(),
@@ -247,6 +249,40 @@ void MetalDeviceQueue::log_readback(device_memory &mem)
           limit ? vmin : 0.0,
           limit ? vmax : 0.0,
           limit ? sum / double(limit) : 0.0);
+}
+
+void MetalDeviceQueue::log_state_summary()
+{
+  /* The render buffer (what the integrator accumulates) and the queue counters (how many paths each kernel was given). */
+  if (n_state_logs_ >= 30) {
+    return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(metal_device_->metal_mem_map_mutex);
+  bool logged = false;
+  for (auto &it : metal_device_->metal_mem_map) {
+    device_memory *mem = it.second->mem;
+    if (!mem || !it.second->hostPtr) {
+      continue;
+    }
+    const string name = mem->log_name();
+    if (name.find("RenderBuffers") != string::npos && mem->data_type == TYPE_FLOAT) {
+      log_readback(*mem);
+      logged = true;
+    }
+    else if (name.find("queue_counter") != string::npos) {
+      const int *v = (const int *)it.second->hostPtr;
+      const size_t count = std::min<size_t>(it.second->size / sizeof(int), 20);
+      string text;
+      for (size_t i = 0; i < count; i++) {
+        text += string_printf(" %d", v[i]);
+      }
+      fprintf(stderr, "[cycles-wm] \"%s\" first values:%s\n", name.c_str(), text.c_str());
+      logged = true;
+    }
+  }
+  if (logged) {
+    n_state_logs_++;
+  }
 }
 
 bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
@@ -348,6 +384,17 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     }
   }
 
+  if (dispatch_logs_[kernel] < 2) {
+    dispatch_logs_[kernel]++;
+    fprintf(stderr,
+            "[cycles-wm] dispatch %s: work size %d, threadgroup %d, shared %d bytes, %zu argument bytes\n",
+            device_kernel_as_string(kernel),
+            work_size,
+            num_threads_per_block,
+            shared_mem_bytes,
+            dynamic_bytes_written);
+  }
+
   wmtcmd_compute_setpso set_pso = {};
   set_pso.type = WMTComputeCommandSetPSO;
   set_pso.pso = pipeline->pipeline;
@@ -442,6 +489,7 @@ bool MetalDeviceQueue::synchronize()
     log_readback(*mem);
   }
   pending_readbacks_.clear();
+  log_state_summary();
 
   debug_synchronize();
 
@@ -506,9 +554,7 @@ void MetalDeviceQueue::copy_to_device(device_memory &mem)
 void MetalDeviceQueue::copy_from_device(device_memory &mem)
 {
   /* Unified memory: the host reads the buffer in place after the queue was synchronized. */
-  if (n_readbacks_logged_ < 40) {
-    pending_readbacks_.push_back(&mem);
-  }
+  pending_readbacks_.push_back(&mem);
 }
 
 void *MetalDeviceQueue::copy_from_device_synchronized(device_memory &mem,

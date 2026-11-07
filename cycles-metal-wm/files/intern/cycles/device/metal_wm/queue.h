@@ -7,6 +7,7 @@
 
 #ifdef WITH_METAL
 
+#  include <map>
 #  include <vector>
 
 #  include "device/kernel.h"
@@ -66,7 +67,10 @@ class MetalDeviceQueue : public DeviceQueue {
   uint64_t n_enqueue_ = 0;
   uint64_t n_sync_ = 0;
   double last_report_ = 0.0;
-  int n_readbacks_logged_ = 0;
+  std::map<string, int> readback_counts_;
+  void log_state_summary();
+  int n_state_logs_ = 0;
+  int dispatch_logs_[DEVICE_KERNEL_NUM] = {};
 };
 
 CCL_NAMESPACE_END

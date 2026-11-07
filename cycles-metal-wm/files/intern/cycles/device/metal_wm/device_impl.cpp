@@ -6,6 +6,7 @@
 #ifdef WITH_METAL
 
 #  include <algorithm>
+#  include <mutex>
 #  include <vector>
 
 #  include "device/metal_wm/device_impl.h"
@@ -77,6 +78,8 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
   }
   prepare_residency();
 
+  self_test();
+
   fprintf(stderr,
           "[cycles-wm] device \"%s\", working set %zu MB (Metal reports %zu MB)\n",
           wm::device_name(mtlDevice).c_str(),
@@ -127,6 +130,135 @@ size_t MetalDevice::recommended_working_set() const
   }
 #  endif
   return budget;
+}
+
+void MetalDevice::self_test()
+{
+  static std::once_flag once;
+  std::call_once(once, [this]() {
+    fprintf(stderr, "[cycles-wm] selftest: residency set %s\n", mtlResidencySet ? "in use" : "NOT available (resources are named per dispatch)");
+
+    const char *src =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void wm_selftest(constant ulong *args [[buffer(0)]], uint tid [[thread_position_in_grid]]) {\n"
+        "  device const float *in = (device const float *)args[0];\n"
+        "  device float *out = (device float *)args[1];\n"
+        "  device atomic_uint *counter = (device atomic_uint *)args[2];\n"
+        "  out[tid] = in[tid] * 2.0f + 1.0f;\n"
+        "  atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);\n"
+        "}\n";
+    obj_handle_t error = 0;
+    obj_handle_t lib = MTLDevice_newLibraryWithSource(mtlDevice, src, strlen(src), 0x0302, 0, &error);
+    string text = wm::error_text(error);
+    if (!lib) {
+      fprintf(stderr, "[cycles-wm] selftest: the test library did not compile: %s\n", text.c_str());
+      return;
+    }
+    obj_handle_t fn = MTLLibrary_newFunction(lib, "wm_selftest");
+    WMTComputePipelineInfoEx info = {};
+    info.compute_function = fn;
+    info.max_total_threads_per_threadgroup = 64;
+    info.flags = 1u;
+    info.immutable_buffers = 0;
+    error = 0;
+    obj_handle_t pso = MTLDevice_newComputePipelineStateEx(mtlDevice, &info, &error);
+    text = wm::error_text(error);
+    if (!pso) {
+      fprintf(stderr, "[cycles-wm] selftest: the test pipeline did not build: %s\n", text.c_str());
+      wm::release(fn);
+      wm::release(lib);
+      return;
+    }
+
+    const int n = 4096;
+    wm::Buffer in = wm::new_buffer(mtlDevice, n * sizeof(float));
+    wm::Buffer out = wm::new_buffer(mtlDevice, n * sizeof(float));
+    wm::Buffer counter = wm::new_buffer(mtlDevice, 16);
+    if (!in.handle || !out.handle || !counter.handle) {
+      fprintf(stderr, "[cycles-wm] selftest: could not allocate the test buffers\n");
+      return;
+    }
+    metal_mem_alloc(in);
+    metal_mem_alloc(out);
+    metal_mem_alloc(counter);
+    prepare_residency();
+    for (int i = 0; i < n; i++) {
+      ((float *)in.contents)[i] = float(i);
+      ((float *)out.contents)[i] = -1.0f;
+    }
+    memset(counter.contents, 0, 16);
+
+    uint64_t args[4] = {in.gpu_address, out.gpu_address, counter.gpu_address, 0};
+
+    obj_handle_t cb = MTLCommandQueue_commandBuffer(mtlComputeCommandQueue);
+    obj_handle_t enc = MTLCommandBuffer_computeCommandEncoder(cb, false);
+
+    vector<wmtcmd_compute_useresource> uses;
+    if (!mtlResidencySet) {
+      for (const obj_handle_t r : {in.handle, out.handle, counter.handle}) {
+        wmtcmd_compute_useresource use = {};
+        use.type = WMTComputeCommandUseResource;
+        use.resource = r;
+        use.usage = WMTResourceUsage(WMTResourceUsageRead | WMTResourceUsageWrite);
+        uses.push_back(use);
+      }
+    }
+    wmtcmd_compute_setpso set_pso = {};
+    set_pso.type = WMTComputeCommandSetPSO;
+    set_pso.pso = pso;
+    set_pso.threadgroup_size = {64, 1, 1};
+    wmtcmd_compute_setbytes set_args = {};
+    set_args.type = WMTComputeCommandSetBytes;
+    set_args.bytes.ptr = args;
+    set_args.length = sizeof(args);
+    set_args.index = 0;
+    wmtcmd_compute_dispatch dispatch = {};
+    dispatch.type = WMTComputeCommandDispatchThreads;
+    dispatch.size = {(uint64_t)n, 1, 1};
+
+    wmtcmd_base *head = nullptr;
+    wmtcmd_base **tail = &head;
+    auto link = [&](void *cmd) {
+      wmtcmd_base *base = (wmtcmd_base *)cmd;
+      base->next.ptr = nullptr;
+      *tail = base;
+      tail = (wmtcmd_base **)&base->next.ptr;
+    };
+    for (wmtcmd_compute_useresource &use : uses) {
+      link(&use);
+    }
+    link(&set_pso);
+    link(&set_args);
+    link(&dispatch);
+    MTLComputeCommandEncoder_encodeCommands(enc, head);
+    MTLCommandEncoder_endEncoding(enc);
+    MTLCommandBuffer_commit(cb);
+    MTLCommandBuffer_waitUntilCompleted(cb);
+    const int status = int(MTLCommandBuffer_status(cb));
+
+    int good = 0;
+    for (int i = 0; i < n; i++) {
+      if (((float *)out.contents)[i] == float(i) * 2.0f + 1.0f) {
+        good++;
+      }
+    }
+    const unsigned counted = *(volatile unsigned *)counter.contents;
+    fprintf(stderr,
+            "[cycles-wm] selftest: command buffer status %d, %d of %d outputs correct, atomic counter %u (expected %d) -> %s\n",
+            status,
+            good,
+            n,
+            counted,
+            n,
+            (good == n && counted == (unsigned)n) ? "GPU PATH OK" : "GPU PATH BROKEN");
+
+    metal_mem_free(in.handle, in.size);
+    metal_mem_free(out.handle, out.size);
+    metal_mem_free(counter.handle, counter.size);
+    wm::release(pso);
+    wm::release(fn);
+    wm::release(lib);
+  });
 }
 
 size_t MetalDevice::total_mem_used() const
@@ -388,10 +520,17 @@ bool MetalDevice::build_pipeline(const DeviceKernel kernel, MetalPipeline &p, st
         "Failed to build the pipeline for %s:\n%s", device_kernel_as_string(kernel), text_error.c_str());
     return false;
   }
-  fprintf(stderr,
-          "[cycles-wm] pipeline %s built in %.2f s\n",
-          device_kernel_as_string(kernel),
-          time_dt() - starttime);
+  {
+    WMTComputePipelineLimits lim = {};
+    MTLComputePipelineState_limits(p.pipeline, &lim);
+    fprintf(stderr,
+            "[cycles-wm] pipeline %s built in %.2f s (threads/group asked %d, pipeline allows %d, width %d)\n",
+            device_kernel_as_string(kernel),
+            time_dt() - starttime,
+            threads_per_threadgroup,
+            int(lim.max_total_threads_per_threadgroup),
+            int(lim.thread_execution_width));
+  }
 
   if (!num_threads_per_block) {
     WMTComputePipelineLimits limits = {};
