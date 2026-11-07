@@ -79,6 +79,7 @@ class MetalDevice : public Device {
   string gpu_architecture();
   bool load_prebuilt_kernels(uint features);
   bool prebuilt_active = false;
+  bool prebuilt_library_only = false; /* the pack's device-independent shader code is used and the GPU code is built on this device (a universal pack) */
   bool prebuilt_disabled = false;   /* the pack did not fit this device: the kernels are compiled as before */
   string gpu_arch_name;
   string ios_version();

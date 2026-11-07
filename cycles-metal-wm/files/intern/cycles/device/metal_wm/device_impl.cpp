@@ -564,7 +564,12 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
   }
   const string arch = gpu_architecture();
   const string os = ios_version();
-  if (os.empty() || !read_whole_file(base + "-" + arch + "-" + os + ".archive", archive)) {
+  prebuilt_library_only = false;
+  const bool have_archive = !os.empty() && read_whole_file(base + "-" + arch + "-" + os + ".archive", archive);
+  /* A pack marked "library-only-ok" (the universal pack) is used without GPU binaries: its device-independent shader code is loaded and the device only builds the GPU code from it. */
+  vector<uint8_t> marker;
+  const bool library_only_ok = read_whole_file(dir + "/library-only-ok", marker);
+  if (!have_archive && !library_only_ok) {
     fprintf(stderr, "[cycles-wm] a kernel pack for features 0x%x exists, but not for this GPU and system (%s, iOS %s)\n", pack, arch.c_str(), os.c_str());
     return false;
   }
@@ -572,11 +577,19 @@ bool MetalDevice::load_prebuilt_kernels(const uint features)
   obj_handle_t error = 0;
   obj_handle_t data = DispatchData_alloc_init(uint64_t(uintptr_t(air.data())), air.size());
   obj_handle_t lib = data ? MTLDevice_newLibrary(mtlDevice, data, &error) : 0;
-  wm::error_text(error);
+  const string lib_why = wm::error_text(error);
   wm::release(data);
   if (!lib) {
-    fprintf(stderr, "[cycles-wm] the kernel pack's library would not load\n");
+    fprintf(stderr, "[cycles-wm] the kernel pack's library would not load: %s\n", lib_why.substr(0, 160).c_str());
     return false;
+  }
+  if (!have_archive) {
+    wm::release(mtlLibrary);
+    mtlLibrary = lib;
+    prebuilt_library_only = true;
+    fprintf(stderr, "[cycles-wm] kernels for features 0x%x (the scene needs 0x%x) loaded from the pack in %.2f s (library %zu KB): the pack has no GPU binaries for %s on iOS %s, so the GPU code is built on this device from the pack's shader code\n",
+            pack, features, time_dt() - started, air.size() >> 10, arch.c_str(), os.c_str());
+    return true;
   }
   error = 0;
   const uint32_t ok = MTLDevice_setBinaryArchive(mtlDevice, archive.data(), archive.size(), nullptr, &error);
@@ -638,7 +651,7 @@ bool MetalDevice::load_kernels(const uint _kernel_features)
     join_precompile();
     prebuilt_active = false;
     bool from_pack = !prebuilt_disabled && load_prebuilt_kernels(kernel_features);
-    if (from_pack && !probe_prebuilt()) {
+    if (from_pack && !prebuilt_library_only && !probe_prebuilt()) {
       from_pack = false;
       prebuilt_active = false;
       prebuilt_disabled = true;
