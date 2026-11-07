@@ -17,6 +17,21 @@
       "notes": "Loads kernels from a pre-built pack when one is installed (no compile on the device); path states sized to the frame; memory breakdown in the log."
     },
     {
+      "id": "blender-kernels-applegpu_g16g",
+      "title": "Blender GPU kernels for this device",
+      "summary": "Render kernels built ahead of time for this device's GPU. Blender then starts rendering without compiling them on the phone, and scenes with transparent shadows render with the right shadows. Download it once; it is used by Blender automatically.",
+      "version": "build 16",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-kernels-applegpu_g16g-b16.zip",
+      "sha256": "145923d0f4791a37b2b77668e06b2d48ced1f01e985a49d5c1da4d9c278e0fce",
+      "bytes": 37760379,
+      "exe": "masks.txt",
+      "folder": "Blender Kernels",
+      "symbol": "bolt.fill",
+      "arch": "applegpu_g16g",
+      "library": false,
+      "notes": "Kernels for feature sets 0x80000803, 0x80080803 and a generic one, for the M4 GPU."
+    },
+    {
       "id": "blender-kernels-applegpu_g16p",
       "title": "Blender GPU kernels for this device",
       "summary": "Render kernels built ahead of time for this device's GPU. Blender then starts rendering without compiling them on the phone, and scenes with transparent shadows render with the right shadows. Download it once; it is used by Blender automatically.",
