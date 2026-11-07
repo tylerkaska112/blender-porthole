@@ -37,7 +37,7 @@
         {
           "kind": "limitation",
           "title": "Everything but the GPU render runs through emulation",
-          "detail": "Blender is the Windows program for Arm. The interface, modifiers and CPU renders run through Porthole's emulator and are slower than on a PC or a Mac. On a simple scene the GPU render was about three times faster than the CPU on an iPhone 15 Pro.",
+          "detail": "Blender is the Windows program for Arm. The interface, modifiers and CPU renders run through Porthole's emulator and are slower than on a PC or a Mac. In one test scene on an iPhone 15 Pro the GPU render took about a third of the CPU's time.",
           "found": "measured in build 14"
         },
         {
