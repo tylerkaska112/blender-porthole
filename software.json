@@ -4,17 +4,17 @@
       "id": "blender",
       "title": "Blender 5.2.3 (GPU rendering)",
       "summary": "Blender with Cycles rendering on this device's GPU through Metal. A Windows Arm64 build; the first start compiles the render kernels (about 30 seconds).",
-      "version": "5.2.3 build 16",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b16.zip",
-      "sha256": "eac5ebeeb6b4040f3c9bbec213ba105ea0e508157959497993ee1c41fece709e",
-      "bytes": 269193725,
+      "version": "5.2.3 build 17",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b17.zip",
+      "sha256": "7373e7d6de60e732844d3bf3d41414ef636f2e84af92f2ac3eee729cefbea596",
+      "bytes": 269193867,
       "exe": "blender.exe",
       "folder": "Blender",
       "vramMB": 4096,
       "swapMB": 0,
       "desktop": true,
       "symbol": "cube.transparent.fill",
-      "notes": "Loads kernels from a pre-built pack when one is installed (no compile on the device); path states sized to the frame; memory breakdown in the log."
+      "notes": "A kernel pack that does not fit the device is dropped and the kernels compile as before; packs are per system version."
     },
     {
       "id": "blender-kernels-applegpu_g16g",
