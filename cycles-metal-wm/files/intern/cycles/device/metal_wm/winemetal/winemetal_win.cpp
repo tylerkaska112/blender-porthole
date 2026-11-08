@@ -495,3 +495,20 @@ DispatchData_alloc_init(uint64_t native_ptr, uint64_t length) {
   UNIX_CALL(114, &params);
   return (obj_handle_t)params.ret;
 }
+
+WINEMETAL_API obj_handle_t
+NSAutoreleasePool_alloc_init() {
+  struct unixcall_generic_obj_ret params;
+  params.ret = 0;
+  UNIX_CALL(10, &params);
+  return (obj_handle_t)params.ret;
+}
+
+WINEMETAL_API uint64_t
+MTLDevice_currentAllocatedSize(obj_handle_t device) {
+  struct unixcall_generic_obj_uint64_ret params;
+  params.handle = device;
+  params.ret = 0;
+  UNIX_CALL(6, &params);
+  return (uint64_t)params.ret;
+}
