@@ -4,61 +4,17 @@
       "id": "blender",
       "title": "Blender 5.2.3 (GPU rendering)",
       "summary": "Blender with Cycles rendering on this device's GPU through Metal. A Windows Arm64 build; the first start compiles the render kernels (about 30 seconds).",
-      "version": "5.2.3 build 19",
-      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b19.zip",
-      "sha256": "57f25791f974ec9f43bde2eb66b3b29fef13fe86234c317e8c711456390e8c9e",
-      "bytes": 269194424,
+      "version": "5.2.3 build 20",
+      "url": "https://github.com/tylerkaska112/blender-porthole/releases/download/v5.2.3-porthole.1/blender-porthole-win-arm64-b20.zip",
+      "sha256": "7c3cad8d4fc5fa1c706f0e6af3da6d1d459b78693d5f1cb8d9bb436e422946b8",
+      "bytes": 269196282,
       "exe": "blender.exe",
       "folder": "Blender",
       "vramMB": 4096,
       "swapMB": 0,
       "desktop": true,
       "symbol": "cube.transparent.fill",
-      "notes": "A kernel pack without GPU binaries for this device now leaves out transparent shadows instead of failing; the other kernels still come from the pack.",
-      "known": [
-        {
-          "kind": "limitation",
-          "title": "Shadows of see-through surfaces need a pack made for your device",
-          "detail": "Leaves, glass and other see-through surfaces cast correct shadows on the GPU only with the GPU kernels made for your exact GPU and system version. Today those exist for the iPhone 15 Pro on iOS 27.2 and the iPad Pro (M4) on iPadOS 27.0. On any other device their shadows render solid. After a system update the pack you have keeps working, without those shadows, until a new one is published.",
-          "found": "found in build 14, still true in build 19"
-        },
-        {
-          "kind": "limitation",
-          "title": "GPU rendering uses more memory than CPU rendering",
-          "detail": "Textures are kept twice while rendering on the GPU, once for the GPU and once on the device's side, and the render's working memory comes on top. Blender keeps its GPU data to a budget of about 2.5 GB on an iPhone 15 Pro. A very large scene can still run out and close Blender: render that one on the CPU.",
-          "found": "build 15 onwards"
-        },
-        {
-          "kind": "limitation",
-          "title": "Without a pack made for your device, the first render takes longer to start",
-          "detail": "With the pack made for your device the render starts within seconds. With the one that works anywhere, part of the render kernels are built on the device first, which can take about a minute.",
-          "found": "build 19"
-        },
-        {
-          "kind": "limitation",
-          "title": "Everything but the GPU render runs through emulation",
-          "detail": "Blender is the Windows program for Arm. The interface, modifiers and CPU renders run through Porthole's emulator and are slower than on a PC or a Mac. In one test scene on an iPhone 15 Pro the GPU render took about a third of the CPU's time.",
-          "found": "measured in build 14"
-        },
-        {
-          "kind": "limitation",
-          "title": "Touch navigation covers the view only",
-          "detail": "Two fingers pan, pinch zooms and a slide orbits the view, with a column of view buttons beside it. Other tools, such as sculpting and typing values, still work best with a keyboard and a mouse.",
-          "found": "Porthole 1.3.42 onwards"
-        },
-        {
-          "kind": "problem",
-          "title": "Apple's shader compiler is stopped when it has to build the biggest kernels",
-          "detail": "iOS ends its Metal compiler service when the kernels with transparent shadows are built on the device. Blender then carries on without those shadows. The packs made for a device avoid this because nothing is built on it; the pack that works anywhere leaves those shadows out on purpose.",
-          "found": "found in builds 11 to 18"
-        },
-        {
-          "kind": "problem",
-          "title": "Only two devices have been tested",
-          "detail": "GPU rendering was checked on an iPhone 15 Pro (iOS 27.2) and an iPad Pro (M4, iPadOS 27.0), each with the pack made for it. The pack that works anywhere was checked on the iPhone only. Other GPUs should use it, but they have not been tested, so a report from one helps.",
-          "found": "as of build 19"
-        }
-      ]
+      "notes": "Build 20: GPU rendering gives its command queue and command buffers back after each render (memory piled up over repeated renders), and the log shows Metal and program memory when a render opens and closes."
     },
     {
       "id": "blender-kernels-applegpu_g16g-ios27.0",
