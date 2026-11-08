@@ -17,6 +17,11 @@
 #  include "util/string.h"
 #  include "util/vector.h"
 
+#  ifdef _WIN32
+#    include "util/windows.h"
+#    include <psapi.h>
+#  endif
+
 CCL_NAMESPACE_BEGIN
 
 namespace wm {
@@ -33,12 +38,47 @@ inline string string_of(const obj_handle_t nsstring)
   return out;
 }
 
+/* An autorelease pool for the Metal calls of one scope. Calls like commandBuffer, computeCommandEncoder and description hand back objects that are only autoreleased: without a pool
+ * on the calling thread they stay alive until the thread ends (a render runs on a thread of its own, and a long one piles up thousands of command buffers). What has to outlive the
+ * scope must be retained inside it (NSObject_retain) and released by whoever keeps it. */
+struct AutoreleasePool {
+  obj_handle_t pool;
+  AutoreleasePool() : pool(NSAutoreleasePool_alloc_init()) {}
+  ~AutoreleasePool()
+  {
+    if (pool) {
+      NSObject_release(pool);
+    }
+  }
+  AutoreleasePool(const AutoreleasePool &) = delete;
+  AutoreleasePool &operator=(const AutoreleasePool &) = delete;
+};
+
+/* What the process holds, in MB, for the log lines that show where memory stays after a render: Metal's allocations on this device and (on Windows) the private bytes of the program. */
+inline size_t metal_allocated_mb(const obj_handle_t device)
+{
+  return size_t(MTLDevice_currentAllocatedSize(device) >> 20);
+}
+
+inline size_t process_private_mb()
+{
+#  ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS_EX counters = {};
+  counters.cb = sizeof(counters);
+  if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&counters, sizeof(counters))) {
+    return size_t(counters.PrivateUsage >> 20);
+  }
+#  endif
+  return 0;
+}
+
 /* The text of an NSError handle (and releases it). */
 inline string error_text(obj_handle_t error)
 {
   if (!error) {
     return "";
   }
+  AutoreleasePool pool;
   const string text = string_of(NSObject_description(error));
   NSObject_release(error);
   return text;
@@ -56,6 +96,7 @@ inline void release(obj_handle_t &handle)
 const vector<obj_handle_t> &devices();
 inline string device_name(const obj_handle_t device)
 {
+  AutoreleasePool pool;
   return string_of(MTLDevice_name(device));
 }
 

@@ -97,6 +97,8 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
           wm::device_name(mtlDevice).c_str(),
           recommended_working_set() >> 20,
           size_t(MTLDevice_recommendedMaxWorkingSetSize(mtlDevice)) >> 20);
+  /* Compared with the line "device closed" of the render before, this shows what a render leaves behind. */
+  fprintf(stderr, "[cycles-wm] memory when the device opened: Metal %zu MB, program %zu MB\n", wm::metal_allocated_mb(mtlDevice), wm::process_private_mb());
 }
 
 MetalDevice::~MetalDevice()
@@ -116,7 +118,9 @@ MetalDevice::~MetalDevice()
   flush_delayed_free_list();
   wm::release(mtlLibrary);
   wm::release(mtlResidencySet);
-  /* The command queue and the device belong to the process. */
+  /* The command queue is this device's own (the device itself belongs to the process, see wm::devices): it keeps the residency set and every command buffer it made alive. */
+  wm::release(mtlComputeCommandQueue);
+  fprintf(stderr, "[cycles-wm] memory when the device closed: Metal %zu MB, program %zu MB\n", wm::metal_allocated_mb(mtlDevice), wm::process_private_mb());
 }
 
 size_t MetalDevice::recommended_working_set() const
@@ -146,6 +150,7 @@ size_t MetalDevice::recommended_working_set() const
 
 void MetalDevice::self_test()
 {
+  wm::AutoreleasePool pool;
   static std::once_flag once;
   std::call_once(once, [this]() {
     fprintf(stderr, "[cycles-wm] selftest: residency set %s\n", mtlResidencySet ? "in use" : "NOT available (resources are named per dispatch)");

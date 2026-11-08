@@ -177,7 +177,12 @@ void MetalDeviceQueue::load_image_info()
 void MetalDeviceQueue::new_command_buffer()
 {
   if (!mtlCommandBuffer_) {
+    /* commandBuffer returns an autoreleased object: this queue keeps its own reference until the command buffer is done (synchronize). */
+    wm::AutoreleasePool pool;
     mtlCommandBuffer_ = MTLCommandQueue_commandBuffer(mtlCommandQueue_);
+    if (mtlCommandBuffer_) {
+      NSObject_retain(mtlCommandBuffer_);
+    }
   }
 }
 
@@ -203,7 +208,13 @@ obj_handle_t MetalDeviceQueue::get_compute_encoder(DeviceKernel kernel)
   close_blit_encoder();
   new_command_buffer();
 
-  mtlComputeEncoder_ = MTLCommandBuffer_computeCommandEncoder(mtlCommandBuffer_, concurrent);
+  {
+    wm::AutoreleasePool pool;
+    mtlComputeEncoder_ = MTLCommandBuffer_computeCommandEncoder(mtlCommandBuffer_, concurrent);
+    if (mtlComputeEncoder_) {
+      NSObject_retain(mtlComputeEncoder_); /* released when the encoding ends */
+    }
+  }
   compute_encoder_concurrent_ = concurrent;
   return mtlComputeEncoder_;
 }
@@ -217,7 +228,13 @@ obj_handle_t MetalDeviceQueue::get_blit_encoder()
   close_compute_encoder();
   new_command_buffer();
 
-  mtlBlitEncoder_ = MTLCommandBuffer_blitCommandEncoder(mtlCommandBuffer_);
+  {
+    wm::AutoreleasePool pool;
+    mtlBlitEncoder_ = MTLCommandBuffer_blitCommandEncoder(mtlCommandBuffer_);
+    if (mtlBlitEncoder_) {
+      NSObject_retain(mtlBlitEncoder_); /* released when the encoding ends */
+    }
+  }
   return mtlBlitEncoder_;
 }
 
@@ -225,6 +242,7 @@ void MetalDeviceQueue::close_compute_encoder()
 {
   if (mtlComputeEncoder_) {
     MTLCommandEncoder_endEncoding(mtlComputeEncoder_);
+    NSObject_release(mtlComputeEncoder_); /* after endEncoding: an encoder released before it aborts the process */
     mtlComputeEncoder_ = 0;
   }
 }
@@ -233,6 +251,7 @@ void MetalDeviceQueue::close_blit_encoder()
 {
   if (mtlBlitEncoder_) {
     MTLCommandEncoder_endEncoding(mtlBlitEncoder_);
+    NSObject_release(mtlBlitEncoder_);
     mtlBlitEncoder_ = 0;
   }
 }
@@ -369,6 +388,7 @@ string MetalDeviceQueue::describe_address(uint64_t address)
  * Cycles kernels are what leaves it empty. If not, the buffer is not reachable the way the self-test's buffers are. */
 void MetalDeviceQueue::probe_counter_write()
 {
+  wm::AutoreleasePool pool; /* the command buffer and encoder below are only autoreleased */
   probe_done_ = true;
   MetalDevice::MetalMem *target = nullptr;
   {
@@ -469,6 +489,7 @@ void MetalDeviceQueue::probe_counter_write()
  * same contents?). A Windows build lays structs out by its own rules; the Metal compiler uses Apple's. */
 void MetalDeviceQueue::layout_check()
 {
+  wm::AutoreleasePool pool; /* the command buffer and encoder below are only autoreleased */
   layout_done_ = true;
   MetalDevice *d = metal_device_;
   if (!d->mtlLibrary || !d->launch_params) {
@@ -792,6 +813,7 @@ bool MetalDeviceQueue::synchronize()
     wait_seconds_ += time_dt() - wait_started;
 
     const WMTCommandBufferStatus status = MTLCommandBuffer_status(mtlCommandBuffer_);
+    NSObject_release(mtlCommandBuffer_); /* the reference new_command_buffer took */
     mtlCommandBuffer_ = 0;
     if (status != WMTCommandBufferStatusCompleted) {
       fprintf(stderr, "[cycles-wm] command buffer finished with status %d\n", int(status));
